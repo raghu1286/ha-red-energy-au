@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timedelta
+from datetime import timedelta
 from typing import Any, Dict, List, Optional
 
 from homeassistant.core import HomeAssistant
@@ -21,13 +21,8 @@ from .data_validation import (
 from .error_recovery import RedEnergyErrorRecoverySystem, ErrorType
 from .performance import PerformanceMonitor, DataProcessor
 from .const import (
-    CONF_CLIENT_ID,
-    CONF_PASSWORD,
-    CONF_USERNAME,
     DEFAULT_SCAN_INTERVAL,
     DOMAIN,
-    SERVICE_TYPE_ELECTRICITY,
-    SERVICE_TYPE_GAS,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -49,10 +44,10 @@ class RedEnergyDataCoordinator(DataUpdateCoordinator):
         self.username = username
         self.password = password
         self.client_id = client_id
-        self.selected_accounts = selected_accounts or []  # FIX: normalize
-        self.services = services or []  # FIX: normalize
+        self.selected_accounts = selected_accounts or []
+        self.services = services or []
 
-        # Stage 5 enhancements
+        # Diagnostics / helpers
         self._error_recovery = RedEnergyErrorRecoverySystem(hass)
         self._performance_monitor = PerformanceMonitor(hass)
         self._data_processor = DataProcessor(self._performance_monitor)
@@ -65,8 +60,11 @@ class RedEnergyDataCoordinator(DataUpdateCoordinator):
         self._customer_data: Optional[Dict[str, Any]] = None
         self._properties: List[Dict[str, Any]] = []
 
-        # If DEFAULT_SCAN_INTERVAL is an int (seconds), this is correct. If it's already a timedelta, set directly.
-        update_iv = timedelta(seconds=DEFAULT_SCAN_INTERVAL) if isinstance(DEFAULT_SCAN_INTERVAL, (int, float)) else DEFAULT_SCAN_INTERVAL
+        update_iv = (
+            timedelta(seconds=DEFAULT_SCAN_INTERVAL)
+            if isinstance(DEFAULT_SCAN_INTERVAL, (int, float))
+            else DEFAULT_SCAN_INTERVAL
+        )
 
         super().__init__(
             hass,
@@ -75,148 +73,154 @@ class RedEnergyDataCoordinator(DataUpdateCoordinator):
             update_interval=update_iv,
         )
 
+    # ---------- Debug helpers ----------
+
+    @staticmethod
+    def _summarize_series(series: list) -> str:
+        if not series:
+            return "[]"
+        n = len(series)
+        if n <= 3:
+            return str(series)
+        # show head/tail
+        head = series[:2]
+        tail = series[-1:]
+        return f"[{head} ... {tail}] (count={n})"
+
+    @staticmethod
+    def _summarize_service_block(svc: dict) -> dict:
+        ud = svc.get("usage_data", {})
+        return {
+            "consumer": svc.get("consumer_number"),
+            "last_updated": svc.get("last_updated"),
+            "total_usage": ud.get("total_usage"),
+            "total_cost": ud.get("total_cost"),
+            "from": ud.get("from_date"),
+            "to": ud.get("to_date"),
+            "daily(len)": len(ud.get("usage_data", [])),
+        }
+
+    def _build_debug_snapshot(self, usage_data: Dict[str, Any]) -> dict:
+        snap: Dict[str, Any] = {"properties": {}}
+        for pid, block in usage_data.items():
+            services = block.get("services", {})
+            snap["properties"][pid] = {
+                "property_name": block.get("property", {}).get("name"),
+                "services": {stype: self._summarize_service_block(svc) for stype, svc in services.items()},
+            }
+        return snap
+
+    # ---------- Update flow ----------
+
     async def _async_update_data(self) -> Dict[str, Any]:
         """Fetch data from Red Energy API."""
-        # FIX: Normalize filters up-front
         selected_accounts_set = set(self.selected_accounts or [])
         enabled_services_set = set(self.services or [])
 
         _LOGGER.debug(
-            "Starting data update - selected_accounts=%s, services=%s",
+            "Update start | selected_accounts=%s | services=%s",
             list(selected_accounts_set) if selected_accounts_set else "(all)",
             list(enabled_services_set) if enabled_services_set else "(all)",
         )
 
         try:
-            # Ensure we're authenticated
+            # Auth
             if not self.api._access_token:
                 _LOGGER.debug("Authenticating with Red Energy API")
                 await self.api.authenticate(self.username, self.password, self.client_id)
 
-            # Get customer and property data if not cached
+            # Base data
             if not self._customer_data:
                 raw_customer_data = await self.api.get_customer_data()
                 self._customer_data = validate_customer_data(raw_customer_data)
 
                 raw_properties = await self.api.get_properties()
-                _LOGGER.debug("Raw properties from API: %s", raw_properties)
+                _LOGGER.debug("API properties raw=%s", raw_properties)
                 self._properties = validate_properties_data(raw_properties)
-                _LOGGER.debug("Validated properties: %s", self._properties)
+                _LOGGER.debug("API properties validated=%s", self._properties)
 
-            # Check for account ID mismatches and auto-correct
-            actual_property_ids = [prop.get("id") for prop in self._properties if prop.get("id")]
-            _LOGGER.debug("Actual property IDs from API: %s", actual_property_ids)
+            actual_property_ids = [p.get("id") for p in self._properties if p.get("id")]
+            _LOGGER.debug("Property IDs available=%s", actual_property_ids)
 
             if selected_accounts_set and not any(acc in actual_property_ids for acc in selected_accounts_set):
                 _LOGGER.warning(
-                    "Selected accounts %s don't match API property IDs %s",
-                    list(selected_accounts_set), actual_property_ids
+                    "Configured accounts %s not in API list %s",
+                    list(selected_accounts_set),
+                    actual_property_ids,
                 )
                 if len(actual_property_ids) == 1:
-                    _LOGGER.info("Auto-correcting to use actual property ID: %s", actual_property_ids[0])
+                    self.selected_accounts = [actual_property_ids[0]]
                     selected_accounts_set = {actual_property_ids[0]}
-                    self.selected_accounts = [actual_property_ids[0]]  # keep config in sync
+                    _LOGGER.info("Auto-corrected selected_accounts to %s", self.selected_accounts)
 
-            # Fetch usage data for selected accounts and services
             usage_data: Dict[str, Any] = {}
-
-            for property_data in self._properties:
-                property_id = property_data.get("id")
-                if not property_id:
+            for prop in self._properties:
+                pid = prop.get("id")
+                if not pid:
                     continue
 
-                # FIX: Only filter by account when a selection is provided
-                is_selected = not selected_accounts_set or (property_id in selected_accounts_set)
-                _LOGGER.debug("Checking property id=%s selected=%s", property_id, is_selected)
-                if not is_selected:
-                    _LOGGER.debug("Skipping unselected property %s", property_id)
+                if selected_accounts_set and pid not in selected_accounts_set:
+                    _LOGGER.debug("Skip property %s (not selected)", pid)
                     continue
 
-                property_services = property_data.get("services", [])
-                property_usage: Dict[str, Any] = {}
+                svcs = prop.get("services", [])
+                _LOGGER.debug("Property %s -> services=%s", pid, svcs)
+                prop_usage: Dict[str, Any] = {}
 
-                _LOGGER.debug("Property %s has services: %s", property_id, property_services)
+                for svc in svcs:
+                    stype = svc.get("type")
+                    consumer = svc.get("consumer_number")
+                    active = svc.get("active", True)
 
-                for service in property_services:
-                    service_type = service.get("type")
-                    consumer_number = service.get("consumer_number")
-                    active = service.get("active", True)
-
-                    _LOGGER.debug(
-                        "Processing service: type=%s, consumer_number=%s, active=%s, enabled_services=%s",
-                        service_type, consumer_number, active,
-                        list(enabled_services_set) if enabled_services_set else "(all)"
-                    )
-
-                    if not consumer_number:
-                        _LOGGER.warning("Service missing consumer_number: %s", service)
+                    if not consumer:
+                        _LOGGER.warning("Property %s service %s missing consumer_number", pid, stype)
                         continue
-
-                    # FIX: Only filter by service when a selection is provided
-                    if enabled_services_set and service_type not in enabled_services_set:
-                        _LOGGER.debug(
-                            "Service type '%s' not in enabled services %s",
-                            service_type, list(enabled_services_set)
-                        )
+                    if enabled_services_set and stype not in enabled_services_set:
+                        _LOGGER.debug("Skip service %s for %s (filtered)", stype, pid)
                         continue
-
                     if not active:
-                        _LOGGER.debug("Service %s is inactive", service_type)
+                        _LOGGER.debug("Skip service %s for %s (inactive)", stype, pid)
                         continue
 
                     try:
-                        # Get usage data for the last 30 days (UTC)
-                        end_dt = dt_util.utcnow()  # FIX: HA UTC
+                        end_dt = dt_util.utcnow()
                         start_dt = end_dt - timedelta(days=30)
-
                         _LOGGER.debug(
-                            "Fetching usage data: consumer_number=%s, start=%s, end=%s",
-                            consumer_number, start_dt.strftime('%Y-%m-%d'), end_dt.strftime('%Y-%m-%d')
+                            "Fetch usage | pid=%s stype=%s consumer=%s period=%s..%s",
+                            pid, stype, consumer, start_dt.date(), end_dt.date()
                         )
 
-                        raw_usage = await self.api.get_usage_data(consumer_number, start_dt, end_dt)
-
+                        raw_usage = await self.api.get_usage_data(consumer, start_dt, end_dt)
                         _LOGGER.debug(
-                            "Raw usage data type: %s, keys: %s",
-                            type(raw_usage),
-                            list(raw_usage.keys()) if isinstance(raw_usage, dict) else "Not a dict"
+                            "Raw usage pid=%s stype=%s: type=%s keys=%s",
+                            pid, stype, type(raw_usage), list(raw_usage.keys()) if isinstance(raw_usage, dict) else "N/A"
                         )
 
-                        # Validate usage data
-                        validated_usage = validate_usage_data(
+                        validated = validate_usage_data(
                             raw_usage,
-                            consumer_number=consumer_number,
-                            from_date=start_dt.strftime('%Y-%m-%d'),
-                            to_date=end_dt.strftime('%Y-%m-%d')
+                            consumer_number=consumer,
+                            from_date=start_dt.strftime("%Y-%m-%d"),
+                            to_date=end_dt.strftime("%Y-%m-%d"),
                         )
 
                         _LOGGER.debug(
-                            "Validated usage data: total_usage=%s, total_cost=%s",
-                            validated_usage.get("total_usage"),
-                            validated_usage.get("total_cost")
+                            "Validated usage pid=%s stype=%s: total_usage=%s total_cost=%s daily_len=%s",
+                            pid, stype,
+                            validated.get("total_usage"),
+                            validated.get("total_cost"),
+                            len(validated.get("usage_data", [])),
                         )
 
-                        property_usage[service_type] = {
-                            "consumer_number": consumer_number,
-                            "usage_data": validated_usage,
+                        prop_usage[stype] = {
+                            "consumer_number": consumer,
+                            "usage_data": validated,
                             "last_updated": end_dt.isoformat(),
                         }
 
-                        _LOGGER.debug(
-                            "Fetched %s usage data for property %s: %s total usage",
-                            service_type,
-                            property_id,
-                            validated_usage.get("total_usage", 0)
-                        )
-
                     except (RedEnergyAPIError, DataValidationError) as err:
-                        _LOGGER.error(
-                            "Failed to fetch/validate %s usage for property %s: %s",
-                            service_type, property_id, err
-                        )
-                        # Don't fail the entire update for one service error; add placeholder entry
-                        property_usage[service_type] = {
-                            "consumer_number": consumer_number,
+                        _LOGGER.error("Fetch/validate failed pid=%s stype=%s err=%s", pid, stype, err)
+                        prop_usage[stype] = {
+                            "consumer_number": consumer,
                             "usage_data": {
                                 "total_usage": 0.0,
                                 "total_cost": 0.0,
@@ -224,48 +228,42 @@ class RedEnergyDataCoordinator(DataUpdateCoordinator):
                                 "from_date": "",
                                 "to_date": "",
                             },
-                            "last_updated": dt_util.utcnow().isoformat(),  # FIX
+                            "last_updated": dt_util.utcnow().isoformat(),
                             "error": str(err),
                         }
-                        continue
 
-                _LOGGER.debug(
-                    "Property %s processed: %d services included after filtering",
-                    property_id, len(property_usage)
-                )
-                if property_usage:
-                    usage_data[property_id] = {
-                        "property": property_data,
-                        "services": property_usage,
-                    }
-                else:
-                    _LOGGER.warning("No services processed for property %s (after filtering/validation)", property_id)
+                _LOGGER.debug("Property %s -> services_kept=%d", pid, len(prop_usage))
+                if prop_usage:
+                    usage_data[pid] = {"property": prop, "services": prop_usage}
 
             if not usage_data:
-                _LOGGER.error("No usage data retrieved. Debug info follows:")
-                _LOGGER.error("- Properties count: %d", len(self._properties))
-                _LOGGER.error("- Selected accounts: %s", list(selected_accounts_set) if selected_accounts_set else "(all)")
-                _LOGGER.error("- Enabled services: %s", list(enabled_services_set) if enabled_services_set else "(all)")
-
-                if self._properties:
-                    for prop in self._properties:
-                        _LOGGER.error(
-                            "- Property: id=%s, services=%s",
-                            prop.get("id"),
-                            [s.get("type") for s in prop.get("services", [])]
-                        )
-
+                _LOGGER.error(
+                    "No usage data. props=%d sel=%s services=%s",
+                    len(self._properties),
+                    list(selected_accounts_set) if selected_accounts_set else "(all)",
+                    list(enabled_services_set) if enabled_services_set else "(all)",
+                )
+                for p in self._properties:
+                    _LOGGER.error(
+                        "Prop id=%s svc_types=%s",
+                        p.get("id"),
+                        [s.get("type") for s in p.get("services", [])],
+                    )
                 raise UpdateFailed("No usage data retrieved for any configured services")
+
+            # Final snapshot: compact per-property/service totals
+            snap = self._build_debug_snapshot(usage_data)
+            _LOGGER.debug("Coordinator snapshot (compact): %s", snap)
 
             return {
                 "customer": self._customer_data,
                 "properties": self._properties,
                 "usage_data": usage_data,
-                "last_update": dt_util.utcnow().isoformat(),  # FIX
+                "last_update": dt_util.utcnow().isoformat(),
             }
 
         except RedEnergyAuthError as err:
-            _LOGGER.error("Authentication failed during update: %s", err)
+            _LOGGER.error("Authentication failed: %s", err)
             raise UpdateFailed(f"Authentication failed: {err}") from err
         except RedEnergyAPIError as err:
             _LOGGER.error("API error during update: %s", err)
@@ -274,14 +272,14 @@ class RedEnergyDataCoordinator(DataUpdateCoordinator):
             _LOGGER.exception("Unexpected error during update")
             raise UpdateFailed(f"Unexpected error: {err}") from err
 
+    # ---------- Optional bulk paths (unchanged except UTC + guards) ----------
+
     async def _bulk_update_data(self) -> Dict[str, Any]:
         """Handle bulk data updates for multiple accounts efficiently."""
         try:
-            # Ensure authentication
             if not self.api._access_token:
                 await self.api.authenticate(self.username, self.password, self.client_id)
 
-            # Get base data if needed
             if not self._customer_data:
                 raw_customer_data = await self.api.get_customer_data()
                 self._customer_data = validate_customer_data(raw_customer_data)
@@ -289,47 +287,44 @@ class RedEnergyDataCoordinator(DataUpdateCoordinator):
                 raw_properties = await self.api.get_properties()
                 self._properties = validate_properties_data(raw_properties)
 
-            # Use bulk processor for multiple accounts
             usage_data = await self._data_processor.batch_process_properties(
-                {prop["id"]: {"property": prop, "services": {}} for prop in self._properties if prop.get("id") in (self.selected_accounts or [])},
+                {
+                    prop["id"]: {"property": prop, "services": {}}
+                    for prop in self._properties
+                    if prop.get("id") in (self.selected_accounts or [])
+                },
                 self.selected_accounts or [],
-                self.services or []
+                self.services or [],
             )
 
-            # Fetch actual usage data concurrently
-            usage_tasks = []
-            for property_data in self._properties:
-                property_id = property_data.get("id")
-                if not property_id:
+            tasks = []
+            for prop in self._properties:
+                pid = prop.get("id")
+                if not pid:
                     continue
-                if self.selected_accounts and property_id not in set(self.selected_accounts):
+                if self.selected_accounts and pid not in set(self.selected_accounts):
                     continue
+                tasks.append((pid, asyncio.create_task(self._fetch_property_usage(prop), name=f"fetch_usage_{pid}")))
 
-                task = asyncio.create_task(
-                    self._fetch_property_usage(property_data),
-                    name=f"fetch_usage_{property_id}"
-                )
-                usage_tasks.append((property_id, task))
-
-            # Wait for all tasks with error handling
             final_usage_data: Dict[str, Any] = {}
-            for property_id, task in usage_tasks:
+            for pid, task in tasks:
                 try:
-                    property_usage = await task
-                    if property_usage:
-                        final_usage_data[property_id] = property_usage
+                    prop_usage = await task
+                    if prop_usage:
+                        final_usage_data[pid] = prop_usage
                 except Exception as err:
-                    _LOGGER.error("Failed to fetch usage for property %s: %s", property_id, err)
-                    continue
+                    _LOGGER.error("Failed to fetch usage for property %s: %s", pid, err)
 
             if not final_usage_data:
                 raise UpdateFailed("No usage data retrieved for any configured services")
+
+            _LOGGER.debug("Bulk snapshot: %s", self._build_debug_snapshot(final_usage_data))
 
             return {
                 "customer": self._customer_data,
                 "properties": self._properties,
                 "usage_data": final_usage_data,
-                "last_update": dt_util.utcnow().isoformat(),  # FIX
+                "last_update": dt_util.utcnow().isoformat(),
             }
 
         except Exception as err:
@@ -340,155 +335,169 @@ class RedEnergyDataCoordinator(DataUpdateCoordinator):
 
     async def _fetch_property_usage(self, property_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Fetch usage data for a single property."""
-        property_id = property_data.get("id")
-        property_services = property_data.get("services", [])
-        property_usage: Dict[str, Any] = {}
+        pid = property_data.get("id")
+        svcs = property_data.get("services", [])
+        prop_usage: Dict[str, Any] = {}
 
         enabled_services_set = set(self.services or [])
 
-        for service in property_services:
-            service_type = service.get("type")
-            consumer_number = service.get("consumer_number")
+        for svc in svcs:
+            stype = svc.get("type")
+            consumer = svc.get("consumer_number")
 
-            # FIX: Only filter by service when a selection is provided
-            if not consumer_number or (enabled_services_set and service_type not in enabled_services_set):
+            if not consumer or (enabled_services_set and stype not in enabled_services_set):
+                _LOGGER.debug("Skip property=%s service=%s (filtered/missing consumer)", pid, stype)
                 continue
-
-            if not service.get("active", True):
+            if not svc.get("active", True):
+                _LOGGER.debug("Skip property=%s service=%s (inactive)", pid, stype)
                 continue
 
             try:
-                # Get usage data for the last 30 days (UTC)
-                end_dt = dt_util.utcnow()  # FIX
+                end_dt = dt_util.utcnow()
                 start_dt = end_dt - timedelta(days=30)
 
-                raw_usage = await self.api.get_usage_data(consumer_number, start_dt, end_dt)
-
-                validated_usage = validate_usage_data(
-                    raw_usage,
-                    consumer_number=consumer_number,
-                    from_date=start_dt.strftime('%Y-%m-%d'),
-                    to_date=end_dt.strftime('%Y-%m-%d')
+                raw = await self.api.get_usage_data(consumer, start_dt, end_dt)
+                validated = validate_usage_data(
+                    raw,
+                    consumer_number=consumer,
+                    from_date=start_dt.strftime("%Y-%m-%d"),
+                    to_date=end_dt.strftime("%Y-%m-%d"),
                 )
 
-                property_usage[service_type] = {
-                    "consumer_number": consumer_number,
-                    "usage_data": validated_usage,
+                prop_usage[stype] = {
+                    "consumer_number": consumer,
+                    "usage_data": validated,
                     "last_updated": end_dt.isoformat(),
                 }
 
+                _LOGGER.debug(
+                    "Prop=%s service=%s fetched: totals u=%s c=%s days=%s",
+                    pid, stype,
+                    validated.get("total_usage"),
+                    validated.get("total_cost"),
+                    len(validated.get("usage_data", [])),
+                )
+
             except Exception as err:
                 await self._error_recovery.async_handle_error(
-                    err, ErrorType.API_DATA_INVALID,
-                    {"property_id": property_id, "service_type": service_type}
+                    err, ErrorType.API_DATA_INVALID, {"property_id": pid, "service_type": stype}
                 )
-                continue
 
-        if property_usage:
-            return {
-                "property": property_data,
-                "services": property_usage,
-            }
-
+        if prop_usage:
+            return {"property": property_data, "services": prop_usage}
         return None
 
     async def _fetch_usage_data_optimized(self) -> Dict[str, Any]:
         """Fetch usage data with performance optimizations."""
         usage_data: Dict[str, Any] = {}
-        for property_data in self._properties:
-            property_id = property_data.get("id")
-            if not property_id:
+        for prop in self._properties:
+            pid = prop.get("id")
+            if not pid:
                 continue
-            # FIX: Only filter when selection provided
-            if self.selected_accounts and property_id not in set(self.selected_accounts):
+            if self.selected_accounts and pid not in set(self.selected_accounts):
                 continue
-
-            property_usage = await self._fetch_property_usage(property_data)
-            if property_usage:
-                usage_data[property_id] = property_usage
-
+            block = await self._fetch_property_usage(prop)
+            if block:
+                usage_data[pid] = block
         return usage_data
 
-    # ---------- Access helpers for sensors ----------
-
-    def get_performance_metrics(self) -> Dict[str, Any]:
-        """Get performance metrics for the coordinator."""
-        return self._performance_monitor.get_performance_stats()
-
-    def get_error_statistics(self) -> Dict[str, Any]:
-        """Get error recovery statistics."""
-        return self._error_recovery.get_error_statistics()
-
-    async def async_refresh_credentials(
-        self, username: str, password: str, client_id: str
-    ) -> bool:
-        """Refresh credentials and test authentication."""
-        try:
-            self.username = username
-            self.password = password
-            self.client_id = client_id
-
-            # Clear cached auth token to force re-authentication
-            self.api._access_token = None
-            self.api._refresh_token = None
-            self.api._token_expires = None
-
-            success = await self.api.authenticate(username, password, client_id)
-            if success:
-                # Clear cached data to force refresh
-                self._customer_data = None
-                self._properties = []
-                await self.async_refresh()
-
-            return success
-
-        except Exception as err:
-            _LOGGER.error("Failed to refresh credentials: %s", err)
-            return False
-
-    async def async_update_account_selection(
-        self, selected_accounts: List[str], services: List[str]
-    ) -> None:
-        """Update account and service selection."""
-        self.selected_accounts = selected_accounts or []
-        self.services = services or []
-        await self.async_refresh()
-
-    # --- Data accessors used by sensor entities ---
+    # ---------- Access helpers for sensors (with DEBUG) ----------
 
     def get_property_data(self, property_id: str) -> Optional[Dict[str, Any]]:
         """Get cached property data by ID."""
         if not self.data or "usage_data" not in self.data:
+            _LOGGER.debug("get_property_data(%s): coordinator.data missing/empty", property_id)
             return None
-        return self.data["usage_data"].get(property_id)
+        block = self.data["usage_data"].get(property_id)
+        if block is None:
+            _LOGGER.debug("get_property_data(%s): not found in usage_data keys=%s", property_id, list(self.data["usage_data"].keys()))
+        else:
+            _LOGGER.debug("get_property_data(%s): found services=%s", property_id, list(block.get("services", {}).keys()))
+        return block
 
-    def get_service_usage(self, property_id: str, service_type: str) -> Optional[Dict[str, Any]]:
+    def get_service_usage(self, property_id: str, service_type: str) -> Optional[dict]:
         """Get usage data for a specific property and service."""
-        property_data = self.get_property_data(property_id)
-        if not property_data:
+        prop = self.get_property_data(property_id)
+        if not prop:
+            _LOGGER.debug("get_service_usage(%s,%s): property not found", property_id, service_type)
             return None
-        return property_data.get("services", {}).get(service_type)
+        svc = prop.get("services", {}).get(service_type)
+        if svc is None:
+            _LOGGER.debug(
+                "get_service_usage(%s,%s): service missing; available=%s",
+                property_id, service_type, list(prop.get("services", {}).keys())
+            )
+        else:
+            ud = svc.get("usage_data", {})
+            _LOGGER.debug(
+                "get_service_usage(%s,%s): totals u=%s c=%s days=%s last=%s",
+                property_id, service_type,
+                ud.get("total_usage"), ud.get("total_cost"),
+                len(ud.get("usage_data", [])), svc.get("last_updated")
+            )
+        return svc
 
     def get_latest_usage(self, property_id: str, service_type: str) -> Optional[float]:
         """Get the most recent usage value for a property and service."""
-        service_data = self.get_service_usage(property_id, service_type)
-        if not service_data or "usage_data" not in service_data:
+        svc = self.get_service_usage(property_id, service_type)
+        if not svc or "usage_data" not in svc:
+            _LOGGER.debug("get_latest_usage(%s,%s): no svc/usage_data", property_id, service_type)
             return None
-        usage_data = service_data["usage_data"].get("usage_data", [])
-        if not usage_data:
+        series = svc["usage_data"].get("usage_data", [])
+        if not series:
+            _LOGGER.debug("get_latest_usage(%s,%s): empty series", property_id, service_type)
             return None
-        return usage_data[-1].get("usage", 0.0)
+        val = series[-1].get("usage", 0.0)
+        _LOGGER.debug("get_latest_usage(%s,%s): %s", property_id, service_type, val)
+        return val
 
     def get_total_cost(self, property_id: str, service_type: str) -> Optional[float]:
         """Get the total cost for a property and service."""
-        service_data = self.get_service_usage(property_id, service_type)
-        if not service_data or "usage_data" not in service_data:
+        svc = self.get_service_usage(property_id, service_type)
+        if not svc or "usage_data" not in svc:
+            _LOGGER.debug("get_total_cost(%s,%s): no svc/usage_data", property_id, service_type)
             return None
-        return service_data["usage_data"].get("total_cost", 0.0)
+        val = svc["usage_data"].get("total_cost", 0.0)
+        _LOGGER.debug("get_total_cost(%s,%s): %s", property_id, service_type, val)
+        return val
 
     def get_total_usage(self, property_id: str, service_type: str) -> Optional[float]:
         """Get the total usage for a property and service."""
-        service_data = self.get_service_usage(property_id, service_type)
-        if not service_data or "usage_data" not in service_data:
+        svc = self.get_service_usage(property_id, service_type)
+        if not svc or "usage_data" not in svc:
+            _LOGGER.debug("get_total_usage(%s,%s): no svc/usage_data", property_id, service_type)
             return None
-        return service_data["usage_data"].get("total_usage", 0.0)
+        val = svc["usage_data"].get("total_usage", 0.0)
+        _LOGGER.debug("get_total_usage(%s,%s): %s", property_id, service_type, val)
+        return val
+
+    # ---------- Misc ----------
+
+    def get_performance_metrics(self) -> Dict[str, Any]:
+        return self._performance_monitor.get_performance_stats()
+
+    def get_error_statistics(self) -> Dict[str, Any]:
+        return self._error_recovery.get_error_statistics()
+
+    async def async_refresh_credentials(self, username: str, password: str, client_id: str) -> bool:
+        try:
+            self.username = username
+            self.password = password
+            self.client_id = client_id
+            self.api._access_token = None
+            self.api._refresh_token = None
+            self.api._token_expires = None
+            ok = await self.api.authenticate(username, password, client_id)
+            if ok:
+                self._customer_data = None
+                self._properties = []
+                await self.async_refresh()
+            return ok
+        except Exception as err:
+            _LOGGER.error("Failed to refresh credentials: %s", err)
+            return False
+
+    async def async_update_account_selection(self, selected_accounts: List[str], services: List[str]) -> None:
+        self.selected_accounts = selected_accounts or []
+        self.services = services or []
+        await self.async_refresh()
