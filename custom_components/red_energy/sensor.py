@@ -36,45 +36,67 @@ if TYPE_CHECKING:
 _LOGGER = logging.getLogger(__name__)
 
 
-async def async_setup_entry(
-    hass: HomeAssistant,
-    config_entry: ConfigEntry,
-    async_add_entities: AddEntitiesCallback,
-) -> None:
-    """Set up Red Energy sensors based on a config entry."""
+async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
     _LOGGER.debug("Setting up Red Energy sensors for config entry %s", config_entry.entry_id)
-    
+
     entry_data = hass.data[DOMAIN][config_entry.entry_id]
     coordinator: RedEnergyDataCoordinator = entry_data["coordinator"]
-    selected_accounts = entry_data["selected_accounts"]
-    services = entry_data["services"]
-    
-    # Check if advanced sensors are enabled
-    advanced_sensors_enabled = config_entry.options.get(CONF_ENABLE_ADVANCED_SENSORS, False)
-    
+
+    # Use resolved ids from __init__.py; may be empty (means "all")
+    selected_accounts = set(entry_data.get("selected_accounts") or [])
+    configured_services = set(entry_data.get("services") or [])
+
+    # What does the coordinator actually have?
+    data = coordinator.data or {}
+    usage_data = data.get("usage_data", {})
+    available_property_ids = set(usage_data.keys())
+    _LOGGER.debug(
+        "Sensor setup inventory: available_property_ids=%s | configured_selected=%s | configured_services=%s",
+        list(available_property_ids), list(selected_accounts) or "(all)", list(configured_services) or "(all)"
+    )
+
+    # If no explicit selection, default to everything we have data for
+    property_ids = selected_accounts or available_property_ids
+
     entities = []
-    
-    # Create sensors for each selected account and service
-    for account_id in selected_accounts:
-        for service_type in services:
-            # Core sensors (always created)
+    advanced_sensors_enabled = config_entry.options.get(CONF_ENABLE_ADVANCED_SENSORS, False)
+
+    created_pairs = []
+
+    for pid in property_ids:
+        block = usage_data.get(pid)
+        if not block:
+            _LOGGER.warning("Selected property id %s not present in coordinator usage_data keys=%s", pid, list(available_property_ids))
+            continue
+
+        actual_services = set((block.get("services") or {}).keys())
+        # respect configured filter if provided
+        if configured_services:
+            actual_services &= configured_services
+
+        if not actual_services:
+            _LOGGER.warning("Property %s has no matching services (actual=%s filtered_by=%s)", pid, list((block.get("services") or {}).keys()), list(configured_services) or "(none)")
+            continue
+
+        for stype in sorted(actual_services):
             entities.extend([
-                RedEnergyUsageSensor(coordinator, config_entry, account_id, service_type),
-                RedEnergyCostSensor(coordinator, config_entry, account_id, service_type),
-                RedEnergyTotalUsageSensor(coordinator, config_entry, account_id, service_type),
+                RedEnergyUsageSensor(coordinator, config_entry, pid, stype),
+                RedEnergyCostSensor(coordinator, config_entry, pid, stype),
+                RedEnergyTotalUsageSensor(coordinator, config_entry, pid, stype),
             ])
-            
-            # Advanced sensors (optional)
             if advanced_sensors_enabled:
                 entities.extend([
-                    RedEnergyDailyAverageSensor(coordinator, config_entry, account_id, service_type),
-                    RedEnergyMonthlyAverageSensor(coordinator, config_entry, account_id, service_type),
-                    RedEnergyPeakUsageSensor(coordinator, config_entry, account_id, service_type),
-                    RedEnergyEfficiencySensor(coordinator, config_entry, account_id, service_type),
+                    RedEnergyDailyAverageSensor(coordinator, config_entry, pid, stype),
+                    RedEnergyMonthlyAverageSensor(coordinator, config_entry, pid, stype),
+                    RedEnergyPeakUsageSensor(coordinator, config_entry, pid, stype),
+                    RedEnergyEfficiencySensor(coordinator, config_entry, pid, stype),
                 ])
-    
-    _LOGGER.debug("Created %d sensors (%d advanced) for Red Energy integration", 
-                 len(entities), len(entities) - (len(selected_accounts) * len(services) * 3))
+            created_pairs.append((pid, stype))
+
+    _LOGGER.debug(
+        "Created %d sensors (%d advanced) for property/service pairs=%s",
+        len(entities), len(entities) - (len(created_pairs) * 3), created_pairs
+    )
     async_add_entities(entities)
 
 
@@ -123,11 +145,18 @@ class RedEnergyBaseSensor(CoordinatorEntity, SensorEntity):
     @property
     def available(self) -> bool:
         """Return if entity is available."""
-        return (
-            self.coordinator.last_update_success
-            and self.coordinator.data is not None
-            and self._property_id in self.coordinator.data.get("usage_data", {})
-        )
+        if not (self.coordinator.last_update_success and self.coordinator.data):
+            _LOGGER.debug("Entity %s unavailable: coordinator not ready", self._attr_unique_id)
+            return False
+        udata = self.coordinator.data.get("usage_data", {})
+        block = udata.get(self._property_id)
+        if not block:
+            _LOGGER.debug("Entity %s unavailable: property %s not in usage_data keys=%s", self._attr_unique_id, self._property_id, list(udata.keys()))
+            return False
+        if self._service_type not in (block.get("services") or {}):
+            _LOGGER.debug("Entity %s unavailable: service %s not in property %s services=%s", self._attr_unique_id, self._service_type, self._property_id, list((block.get("services") or {}).keys()))
+            return False
+        return True
 
 
 class RedEnergyUsageSensor(RedEnergyBaseSensor):
