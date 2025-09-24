@@ -179,6 +179,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 if len(self._accounts) == 1:
                     # Only one account, auto-select it
                     account_id = self._accounts[0].get("accountNumber")
+                    _LOGGER.info("Account ID: %s", account_id)
                     if account_id:
                         self._selected_accounts = [str(account_id)]
                         return await self.async_step_service_select()
