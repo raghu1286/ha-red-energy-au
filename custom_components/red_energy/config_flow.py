@@ -124,6 +124,18 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Red Energy."""
 
     VERSION = 1
+    
+    @staticmethod
+    async def async_migrate_entry(hass: HomeAssistant, config_entry: config_entries.ConfigEntry) -> bool:
+        """Migrate old entry."""
+        _LOGGER.debug("Migrating config entry from version %s", config_entry.version)
+        
+        if config_entry.version == 1:
+            # Already at current version
+            return True
+            
+        # If we ever need to migrate from older versions
+        return True
 
     def __init__(self) -> None:
         """Initialize the config flow."""
@@ -166,8 +178,13 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 # Move to account selection
                 if len(self._accounts) == 1:
                     # Only one account, auto-select it
-                    self._selected_accounts = [self._accounts[0].get("id", "0")]
-                    return await self.async_step_service_select()
+                    account_id = self._accounts[0].get("accountNumber")
+                    if account_id:
+                        self._selected_accounts = [str(account_id)]
+                        return await self.async_step_service_select()
+                    else:
+                        _LOGGER.error("Single account found but no ID available: %s", self._accounts[0])
+                        return await self.async_step_account_select()
                 else:
                     return await self.async_step_account_select()
 
@@ -197,7 +214,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         # Build account selection options
         account_options = {}
         for account in self._accounts:
-            account_id = account.get("id", "unknown")
+            account_id = account.get("accountNumber", "unknown")
             account_name = account.get("name", f"Account {account_id}")
             address = account.get("address", {})
             display_name = f"{account_name}"
@@ -206,7 +223,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             account_options[account_id] = display_name
 
         schema = vol.Schema({
-            vol.Required(DATA_SELECTED_ACCOUNTS): vol.In(account_options),
+            vol.Required(DATA_SELECTED_ACCOUNTS): cv.multi_select(account_options),
         })
 
         return self.async_show_form(
@@ -246,9 +263,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         }
         
         schema = vol.Schema({
-            vol.Required("services", default=[SERVICE_TYPE_ELECTRICITY]): vol.All(
-                cv.ensure_list, [vol.In(service_options)]
-            ),
+            vol.Required("services", default=[SERVICE_TYPE_ELECTRICITY]): cv.multi_select(service_options),
         })
 
         return self.async_show_form(
@@ -280,14 +295,24 @@ class RedEnergyOptionsFlowHandler(config_entries.OptionsFlow):
     ) -> FlowResult:
         """Manage the options."""
         if user_input is not None:
-            # Update coordinator polling interval if changed
-            entry_data = self.hass.data[DOMAIN][self.config_entry.entry_id]
-            coordinator = entry_data["coordinator"]
-            
-            new_interval = user_input.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)
-            if new_interval != coordinator.update_interval.total_seconds():
-                coordinator.update_interval = timedelta(seconds=new_interval)
-                _LOGGER.info("Updated polling interval to %d seconds", new_interval)
+            # Update coordinator polling interval if changed (only if integration is loaded)
+            if DOMAIN in self.hass.data and self.config_entry.entry_id in self.hass.data[DOMAIN]:
+                entry_data = self.hass.data[DOMAIN][self.config_entry.entry_id]
+                coordinator = entry_data["coordinator"]
+                
+                new_interval = user_input.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)
+                # Ensure new_interval is an integer
+                if isinstance(new_interval, str):
+                    try:
+                        new_interval = int(new_interval)
+                    except ValueError:
+                        new_interval = DEFAULT_SCAN_INTERVAL
+                        
+                if new_interval != coordinator.update_interval.total_seconds():
+                    coordinator.update_interval = timedelta(seconds=new_interval)
+                    _LOGGER.info("Updated polling interval to %d seconds", new_interval)
+            else:
+                _LOGGER.debug("Integration not yet loaded, options will be applied on next restart")
             
             return self.async_create_entry(title="", data=user_input)
 
@@ -296,6 +321,13 @@ class RedEnergyOptionsFlowHandler(config_entries.OptionsFlow):
         current_options = self.config_entry.options
         current_scan_interval = current_options.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)
         current_advanced_sensors = current_options.get(CONF_ENABLE_ADVANCED_SENSORS, False)
+        
+        # Ensure current_scan_interval is an integer
+        if isinstance(current_scan_interval, str):
+            try:
+                current_scan_interval = int(current_scan_interval)
+            except ValueError:
+                current_scan_interval = DEFAULT_SCAN_INTERVAL
         
         service_options = {
             SERVICE_TYPE_ELECTRICITY: "Electricity",
@@ -317,18 +349,24 @@ class RedEnergyOptionsFlowHandler(config_entries.OptionsFlow):
                 interval_options[key] = "1 hour"
         
         schema = vol.Schema({
-            vol.Required("services", default=current_services): vol.All(
-                cv.ensure_list, [vol.In(service_options)]
-            ),
+            vol.Required("services", default=current_services): cv.multi_select(service_options),
             vol.Required(CONF_SCAN_INTERVAL, default=current_scan_interval): vol.In(interval_options),
             vol.Required(CONF_ENABLE_ADVANCED_SENSORS, default=current_advanced_sensors): bool,
         })
 
+        # Find the display name for current interval
+        current_interval_display = "5 minutes (default)"  # fallback
+        for key, seconds in SCAN_INTERVAL_OPTIONS.items():
+            if seconds == current_scan_interval:
+                if key in interval_options:
+                    current_interval_display = interval_options[key]
+                break
+        
         return self.async_show_form(
             step_id="init",
             data_schema=schema,
             description_placeholders={
-                "current_interval": f"{current_scan_interval // 60} minutes",
+                "current_interval": current_interval_display,
             }
         )
 

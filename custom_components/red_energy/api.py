@@ -306,6 +306,14 @@ class RedEnergyAPI:
         
         async with async_timeout.timeout(API_TIMEOUT):
             async with self._session.get(url, headers=headers, params=params) as response:
+                _LOGGER.debug("Usage API response: status=%s, url=%s, params=%s", 
+                             response.status, url, params)
+                
+                if response.status != 200:
+                    response_text = await response.text()
+                    _LOGGER.error("Usage API failed with status %s: %s", 
+                                 response.status, response_text)
+                    
                 response.raise_for_status()
                 return await response.json()
     
