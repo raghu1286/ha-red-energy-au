@@ -28,6 +28,15 @@ from .const import (
 from .coordinator import RedEnergyCoordinator
 from .models import EnergyBreakdown, EnergyPeriod, PropertyEnergyData
 
+FRIENDLY_SENSOR_NAMES = {
+    "daily_electricity": "Red Energy Daily Electricity",
+    "weekly_electricity": "Red Energy Weekly Electricity",
+    "monthly_electricity": "Red Energy Monthly Electricity",
+    "daily_solar": "Red Energy Daily Solar",
+    "weekly_solar": "Red Energy Weekly Solar",
+    "monthly_solar": "Red Energy Monthly Solar",
+}
+
 
 @dataclass(frozen=True, slots=True)
 class RedEnergySensorDescription(SensorEntityDescription):
@@ -122,7 +131,7 @@ async def async_setup_entry(
 class RedEnergySensor(CoordinatorEntity[RedEnergyCoordinator], SensorEntity):
     """Base sensor representing Red Energy energy usage."""
 
-    _attr_has_entity_name = True
+    _attr_has_entity_name = False
 
     def __init__(
         self,
@@ -137,6 +146,10 @@ class RedEnergySensor(CoordinatorEntity[RedEnergyCoordinator], SensorEntity):
         self._property_id = property_id
         self._attr_unique_id = f"{entry.entry_id}_{property_id}_{description.key}"
         self._attr_translation_key = description.translation_key
+        self._attr_name = FRIENDLY_SENSOR_NAMES.get(
+            description.translation_key,
+            f"Red Energy {description.key.replace('_', ' ').title()}"
+        )
 
     @property
     def _property_data(self) -> PropertyEnergyData | None:
