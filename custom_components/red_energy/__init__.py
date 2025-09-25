@@ -217,15 +217,6 @@ def _extract_consumer_from_payload(raw: Mapping[str, object]) -> str | None:
     def _extract_candidate(candidate: Mapping[str, object]) -> str | None:
         for key in (
             "consumerNumber",
-            "consumer_number",
-            "consumerNo",
-            "consumer_no",
-            "accountNumber",
-            "account_number",
-            "nmi",
-            "nmiNumber",
-            "meterNumber",
-            "meter_number",
         ):
             value = candidate.get(key)
             if value:
