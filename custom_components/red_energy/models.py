@@ -12,6 +12,8 @@ class DailyUsageEntry:
     day: date
     consumption_kwh: float
     generation_kwh: float
+    consumption_cost: float
+    generation_value: float
 
 
 @dataclass(slots=True)
@@ -22,6 +24,8 @@ class EnergyPeriod:
     end: date
     consumption_kwh: float
     generation_kwh: float
+    consumption_cost: float
+    generation_value: float
 
 
 @dataclass(slots=True)
@@ -34,6 +38,18 @@ class EnergyBreakdown:
 
 
 @dataclass(slots=True)
+class HourlyUsage:
+    """Latest hourly usage summary."""
+
+    start: datetime
+    end: datetime
+    consumption_kwh: float
+    generation_kwh: float
+    consumption_cost: float
+    generation_value: float
+
+
+@dataclass(slots=True)
 class PropertyEnergyData:
     """Energy overview for a property."""
 
@@ -42,6 +58,7 @@ class PropertyEnergyData:
     breakdown: EnergyBreakdown
     last_updated: datetime
     consumer_number: str
+    latest_hour: HourlyUsage | None
 
 
 @dataclass(slots=True)

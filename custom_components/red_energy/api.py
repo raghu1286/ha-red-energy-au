@@ -249,6 +249,40 @@ class RedEnergyClient:
         )
         return _normalise_daily_payload(payload)
 
+    async def async_get_interval_usage(
+        self,
+        consumer_number: str,
+        *,
+        end_date: date | None = None,
+        days: int = 2,
+    ) -> list[dict[str, Any]]:
+        """Return raw interval usage data for the consumer."""
+        await self.async_ensure_token()
+        end = end_date or dt_util.utcnow().date()
+        start = end - timedelta(days=days - 1)
+
+        url = f"{self.BASE_API_URL}/usage/interval"
+        params = {
+            "consumerNumber": consumer_number,
+            "fromDate": start.strftime(_DATE_FMT),
+            "toDate": end.strftime(_DATE_FMT),
+        }
+        headers = {"Authorization": f"Bearer {self._access_token}"}
+
+        async with async_timeout.timeout(API_TIMEOUT):
+            async with self._session.get(url, headers=headers, params=params) as response:
+                response.raise_for_status()
+                payload = await response.json()
+
+        self._log_api_payload(
+            "GET usage/interval",
+            {
+                "params": params,
+                "payload": payload,
+            },
+        )
+        return payload if isinstance(payload, list) else []
+
     async def async_refresh_token(self) -> None:
         """Refresh the access token using the current refresh token."""
         if not self._refresh_token:
@@ -323,6 +357,8 @@ def _normalise_daily_payload(payload: Any) -> list[DailyUsageEntry]:
 
         consumption = 0.0
         generation = 0.0
+        consumption_cost = 0.0
+        generation_value = 0.0
 
         if isinstance(item.get("halfHours"), list):
             for interval in item["halfHours"]:
@@ -330,15 +366,21 @@ def _normalise_daily_payload(payload: Any) -> list[DailyUsageEntry]:
                     continue
                 consumption += float(interval.get("consumptionKwh", 0) or 0)
                 generation += float(interval.get("generationKwh", 0) or 0)
+                consumption_cost += float(interval.get("consumptionDollarIncGst") or interval.get("consumptionDollar") or 0)
+                generation_value += float(interval.get("generationDollar") or interval.get("generationDollarIncGst") or 0)
         else:
             consumption = float(item.get("consumptionKwh") or item.get("usage") or 0)
             generation = float(item.get("generationKwh") or item.get("generation") or 0)
+            consumption_cost = float(item.get("consumptionDollarIncGst") or item.get("consumptionDollar") or 0)
+            generation_value = float(item.get("generationDollar") or item.get("generationDollarIncGst") or 0)
 
         entries.append(
             DailyUsageEntry(
                 day=day,
                 consumption_kwh=round(consumption, 3),
                 generation_kwh=round(generation, 3),
+                consumption_cost=round(consumption_cost, 2),
+                generation_value=round(generation_value, 2),
             )
         )
 

@@ -30,6 +30,7 @@ async def async_get_config_entry_diagnostics(
             "daily": data.breakdown.daily.__dict__,
             "weekly": data.breakdown.weekly.__dict__,
             "monthly": data.breakdown.monthly.__dict__,
+            "latest_hour": data.latest_hour.__dict__ if data.latest_hour else None,
             "last_updated": data.last_updated.isoformat(),
         }
 

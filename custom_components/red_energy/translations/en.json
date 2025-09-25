@@ -35,20 +35,50 @@
       "red_energy_daily_electricity": {
         "name": "Daily Electricity"
       },
+      "red_energy_daily_electricity_cost": {
+        "name": "Daily Electricity Cost"
+      },
       "red_energy_weekly_electricity": {
         "name": "Weekly Electricity"
+      },
+      "red_energy_weekly_electricity_cost": {
+        "name": "Weekly Electricity Cost"
       },
       "red_energy_monthly_electricity": {
         "name": "Monthly Electricity"
       },
+      "red_energy_monthly_electricity_cost": {
+        "name": "Monthly Electricity Cost"
+      },
       "red_energy_daily_solar": {
         "name": "Daily Solar"
+      },
+      "red_energy_daily_solar_value": {
+        "name": "Daily Solar Value"
       },
       "red_energy_weekly_solar": {
         "name": "Weekly Solar"
       },
+      "red_energy_weekly_solar_value": {
+        "name": "Weekly Solar Value"
+      },
       "red_energy_monthly_solar": {
         "name": "Monthly Solar"
+      },
+      "red_energy_monthly_solar_value": {
+        "name": "Monthly Solar Value"
+      },
+      "red_energy_hourly_electricity": {
+        "name": "Hourly Electricity"
+      },
+      "red_energy_hourly_electricity_cost": {
+        "name": "Hourly Electricity Cost"
+      },
+      "red_energy_hourly_solar": {
+        "name": "Hourly Solar"
+      },
+      "red_energy_hourly_solar_value": {
+        "name": "Hourly Solar Value"
       }
     }
   },

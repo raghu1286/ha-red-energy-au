@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterable
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any
 
 from homeassistant.core import HomeAssistant
@@ -16,6 +16,7 @@ from .models import (
     DailyUsageEntry,
     EnergyBreakdown,
     EnergyPeriod,
+    HourlyUsage,
     PropertyEnergyData,
     SelectedProperty,
 )
@@ -103,6 +104,7 @@ class RedEnergyCoordinator(DataUpdateCoordinator[dict[str, PropertyEnergyData]])
             )
             try:
                 daily_entries = await self._client.async_get_daily_usage_entries(consumer_number)
+                interval_payload = await self._client.async_get_interval_usage(consumer_number)
             except RedEnergyAuthError as err:
                 raise UpdateFailed(
                     f"Authentication failed while fetching usage for {selected.property_id}: {err}"
@@ -117,12 +119,14 @@ class RedEnergyCoordinator(DataUpdateCoordinator[dict[str, PropertyEnergyData]])
                 ) from err
 
             breakdown = _build_breakdown(daily_entries)
+            latest_hour = _build_latest_hour(interval_payload)
             results[selected.property_id] = PropertyEnergyData(
                 property_id=selected.property_id,
                 name=name,
                 breakdown=breakdown,
                 last_updated=now,
                 consumer_number=consumer_number,
+                latest_hour=latest_hour,
             )
             selected.name = name
             selected.consumer_number = consumer_number
@@ -209,14 +213,73 @@ def _build_period(
         start = entry_list[0].day
         consumption = sum(entry.consumption_kwh for entry in entry_list)
         generation = sum(entry.generation_kwh for entry in entry_list)
+        consumption_cost = sum(entry.consumption_cost for entry in entry_list)
+        generation_value = sum(entry.generation_value for entry in entry_list)
     else:
         start = default_start
         consumption = 0.0
         generation = 0.0
+        consumption_cost = 0.0
+        generation_value = 0.0
 
     return EnergyPeriod(
         start=start,
         end=end,
         consumption_kwh=round(consumption, 3),
         generation_kwh=round(generation, 3),
+        consumption_cost=round(consumption_cost, 2),
+        generation_value=round(generation_value, 2),
+    )
+
+
+def _build_latest_hour(interval_payload: list[dict[str, Any]]) -> HourlyUsage | None:
+    """Aggregate interval payload into the latest hourly summary."""
+    buckets: dict[datetime, dict[str, float]] = {}
+
+    for day_block in interval_payload:
+        half_hours = day_block.get("halfHours")
+        if not isinstance(half_hours, list):
+            continue
+        for interval in half_hours:
+            if not isinstance(interval, dict):
+                continue
+            start_str = interval.get("intervalStart")
+            start_dt = dt_util.parse_datetime(start_str) if start_str else None
+            if not start_dt:
+                continue
+            hour_start = start_dt.replace(minute=0, second=0, microsecond=0)
+            bucket = buckets.setdefault(
+                hour_start,
+                {
+                    "consumption_kwh": 0.0,
+                    "generation_kwh": 0.0,
+                    "consumption_cost": 0.0,
+                    "generation_value": 0.0,
+                },
+            )
+            bucket["consumption_kwh"] += float(interval.get("consumptionKwh") or 0)
+            bucket["generation_kwh"] += float(interval.get("generationKwh") or 0)
+            bucket["consumption_cost"] += float(
+                interval.get("consumptionDollarIncGst")
+                or interval.get("consumptionDollar")
+                or 0
+            )
+            bucket["generation_value"] += float(
+                interval.get("generationDollar")
+                or interval.get("generationDollarIncGst")
+                or 0
+            )
+
+    if not buckets:
+        return None
+
+    latest_start = max(buckets)
+    data = buckets[latest_start]
+    return HourlyUsage(
+        start=latest_start,
+        end=latest_start + timedelta(hours=1),
+        consumption_kwh=round(data["consumption_kwh"], 3),
+        generation_kwh=round(data["generation_kwh"], 3),
+        consumption_cost=round(data["consumption_cost"], 2),
+        generation_value=round(data["generation_value"], 2),
     )
