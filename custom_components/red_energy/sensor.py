@@ -1,911 +1,200 @@
-"""Red Energy sensor platform."""
+"""Sensor platform for Red Energy energy tracking."""
 from __future__ import annotations
 
-import logging
-from typing import TYPE_CHECKING, Any, Optional
+from dataclasses import dataclass
 
 from homeassistant.components.sensor import (
     SensorDeviceClass,
     SensorEntity,
+    SensorEntityDescription,
     SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import (
-    UnitOfEnergy,
-    UnitOfVolume,
-)
+from homeassistant.const import UnitOfEnergy
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import (
-    CONF_ENABLE_ADVANCED_SENSORS,
+    DATA_COORDINATOR,
     DOMAIN,
-    SENSOR_TYPE_DAILY_AVERAGE,
-    SENSOR_TYPE_EFFICIENCY,
-    SENSOR_TYPE_MONTHLY_AVERAGE,
-    SENSOR_TYPE_PEAK_USAGE,
-    SERVICE_TYPE_ELECTRICITY,
-    SERVICE_TYPE_GAS,
+    SENSOR_KIND_DAILY_ELECTRICITY,
+    SENSOR_KIND_DAILY_SOLAR,
+    SENSOR_KIND_MONTHLY_ELECTRICITY,
+    SENSOR_KIND_MONTHLY_SOLAR,
+    SENSOR_KIND_WEEKLY_ELECTRICITY,
+    SENSOR_KIND_WEEKLY_SOLAR,
 )
-from .coordinator import RedEnergyDataCoordinator
-
-if TYPE_CHECKING:
-    pass
-
-_LOGGER = logging.getLogger(__name__)
+from .coordinator import RedEnergyCoordinator
+from .models import EnergyBreakdown, EnergyPeriod, PropertyEnergyData
 
 
-async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
-    _LOGGER.debug("Setting up Red Energy sensors for config entry %s", config_entry.entry_id)
+@dataclass(frozen=True, slots=True)
+class RedEnergySensorDescription(SensorEntityDescription):
+    """Describe a Red Energy sensor."""
 
-    entry_data = hass.data[DOMAIN][config_entry.entry_id]
-    coordinator: RedEnergyDataCoordinator = entry_data["coordinator"]
-
-    # Use resolved ids from __init__.py; may be empty (means "all")
-    selected_accounts = set(entry_data.get("selected_accounts") or [])
-    configured_services = set(entry_data.get("services") or [])
-
-    # What does the coordinator actually have?
-    data = coordinator.data or {}
-    usage_data = data.get("usage_data", {})
-    available_property_ids = set(usage_data.keys())
-    _LOGGER.debug(
-        "Sensor setup inventory: available_property_ids=%s | configured_selected=%s | configured_services=%s",
-        list(available_property_ids), list(selected_accounts) or "(all)", list(configured_services) or "(all)"
-    )
-
-    # If no explicit selection, default to everything we have data for
-    property_ids = selected_accounts or available_property_ids
-
-    entities = []
-    advanced_sensors_enabled = config_entry.options.get(CONF_ENABLE_ADVANCED_SENSORS, True)
-
-    created_pairs = []
-    base_sensor_count = 0
-    advanced_sensor_count = 0
-
-    for pid in property_ids:
-        block = usage_data.get(pid)
-        if not block:
-            _LOGGER.warning("Selected property id %s not present in coordinator usage_data keys=%s", pid, list(available_property_ids))
-            continue
-
-        actual_services = set((block.get("services") or {}).keys())
-        # respect configured filter if provided
-        if configured_services:
-            actual_services &= configured_services
-
-        if not actual_services:
-            _LOGGER.warning("Property %s has no matching services (actual=%s filtered_by=%s)", pid, list((block.get("services") or {}).keys()), list(configured_services) or "(none)")
-            continue
-
-        for stype in sorted(actual_services):
-            base_entities = [
-                RedEnergyUsageSensor(coordinator, config_entry, pid, stype),
-                RedEnergyCostSensor(coordinator, config_entry, pid, stype),
-                RedEnergyTotalUsageSensor(coordinator, config_entry, pid, stype),
-            ]
-
-            entities.extend(base_entities)
-            base_sensor_count += len(base_entities)
-
-            if stype == SERVICE_TYPE_ELECTRICITY:
-                electric_base = [
-                    RedEnergyTotalGenerationSensor(coordinator, config_entry, pid, stype),
-                    RedEnergyGenerationValueSensor(coordinator, config_entry, pid, stype),
-                ]
-                entities.extend(electric_base)
-                base_sensor_count += len(electric_base)
-
-            if advanced_sensors_enabled:
-                advanced_entities = [
-                    RedEnergyDailyAverageSensor(coordinator, config_entry, pid, stype),
-                    RedEnergyMonthlyAverageSensor(coordinator, config_entry, pid, stype),
-                    RedEnergyPeakUsageSensor(coordinator, config_entry, pid, stype),
-                    RedEnergyEfficiencySensor(coordinator, config_entry, pid, stype),
-                ]
-
-                if stype == SERVICE_TYPE_ELECTRICITY:
-                    advanced_entities.extend([
-                        RedEnergyDailySolarGenerationSensor(coordinator, config_entry, pid, stype),
-                        RedEnergyDailySolarValueSensor(coordinator, config_entry, pid, stype),
-                        RedEnergyDailyCarbonSensor(coordinator, config_entry, pid, stype),
-                        RedEnergyMonthlyConsumptionSensor(coordinator, config_entry, pid, stype),
-                        RedEnergyMonthlyGenerationSensor(coordinator, config_entry, pid, stype),
-                        RedEnergyMonthlyGenerationValueSensor(coordinator, config_entry, pid, stype),
-                        RedEnergyMonthlyChargesSensor(coordinator, config_entry, pid, stype),
-                        RedEnergyMonthlyCarbonSensor(coordinator, config_entry, pid, stype),
-                    ])
-
-                entities.extend(advanced_entities)
-                advanced_sensor_count += len(advanced_entities)
-
-            created_pairs.append((pid, stype))
-
-    _LOGGER.debug(
-        "Created %d sensors (%d base, %d advanced) for property/service pairs=%s",
-        len(entities), base_sensor_count, advanced_sensor_count, created_pairs
-    )
-    async_add_entities(entities)
+    period: str
+    metric: str
 
 
-class RedEnergyBaseSensor(CoordinatorEntity, SensorEntity):
-    """Base class for Red Energy sensors."""
+SENSOR_DESCRIPTIONS: tuple[RedEnergySensorDescription, ...] = (
+    RedEnergySensorDescription(
+        key=SENSOR_KIND_DAILY_ELECTRICITY,
+        translation_key="daily_electricity",
+        device_class=SensorDeviceClass.ENERGY,
+        state_class=SensorStateClass.TOTAL,
+        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        period="daily",
+        metric="consumption",
+    ),
+    RedEnergySensorDescription(
+        key=SENSOR_KIND_WEEKLY_ELECTRICITY,
+        translation_key="weekly_electricity",
+        device_class=SensorDeviceClass.ENERGY,
+        state_class=SensorStateClass.TOTAL,
+        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        period="weekly",
+        metric="consumption",
+    ),
+    RedEnergySensorDescription(
+        key=SENSOR_KIND_MONTHLY_ELECTRICITY,
+        translation_key="monthly_electricity",
+        device_class=SensorDeviceClass.ENERGY,
+        state_class=SensorStateClass.TOTAL,
+        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        period="monthly",
+        metric="consumption",
+    ),
+    RedEnergySensorDescription(
+        key=SENSOR_KIND_DAILY_SOLAR,
+        translation_key="daily_solar",
+        device_class=SensorDeviceClass.ENERGY,
+        state_class=SensorStateClass.TOTAL,
+        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        period="daily",
+        metric="generation",
+    ),
+    RedEnergySensorDescription(
+        key=SENSOR_KIND_WEEKLY_SOLAR,
+        translation_key="weekly_solar",
+        device_class=SensorDeviceClass.ENERGY,
+        state_class=SensorStateClass.TOTAL,
+        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        period="weekly",
+        metric="generation",
+    ),
+    RedEnergySensorDescription(
+        key=SENSOR_KIND_MONTHLY_SOLAR,
+        translation_key="monthly_solar",
+        device_class=SensorDeviceClass.ENERGY,
+        state_class=SensorStateClass.TOTAL,
+        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        period="monthly",
+        metric="generation",
+    ),
+)
+
+
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    async_add_entities: AddEntitiesCallback,
+) -> None:
+    """Set up Red Energy sensors for a config entry."""
+    runtime = hass.data[DOMAIN][entry.entry_id]
+    coordinator: RedEnergyCoordinator = runtime[DATA_COORDINATOR]
+
+    sensors: list[RedEnergySensor] = []
+    for property_id in sorted(coordinator.data or {}):
+        for description in SENSOR_DESCRIPTIONS:
+            sensors.append(
+                RedEnergySensor(
+                    coordinator=coordinator,
+                    entry=entry,
+                    property_id=property_id,
+                    description=description,
+                )
+            )
+
+    async_add_entities(sensors)
+
+
+class RedEnergySensor(CoordinatorEntity[RedEnergyCoordinator], SensorEntity):
+    """Base sensor representing Red Energy energy usage."""
+
+    _attr_has_entity_name = True
 
     def __init__(
         self,
-        coordinator: RedEnergyDataCoordinator,
-        config_entry: ConfigEntry,
+        coordinator: RedEnergyCoordinator,
+        entry: ConfigEntry,
+        *,
         property_id: str,
-        service_type: str,
-        sensor_type: str,
+        description: RedEnergySensorDescription,
     ) -> None:
-        """Initialize the sensor."""
         super().__init__(coordinator)
-        
-        self._config_entry = config_entry
+        self.entity_description = description
         self._property_id = property_id
-        self._service_type = service_type
-        self._sensor_type = sensor_type
-        
-        # Get property info for naming
-        property_data = None
-        if coordinator.data and "usage_data" in coordinator.data:
-            property_data = coordinator.data["usage_data"].get(property_id, {}).get("property")
-        
-        property_name = "Unknown Property"
-        if property_data:
-            property_name = property_data.get("name", f"Property {property_id}")
-            
-        service_display = service_type.title()
+        self._attr_unique_id = f"{entry.entry_id}_{property_id}_{description.key}"
+        self._attr_translation_key = description.translation_key
 
-        sensor_label = sensor_type.replace("_", " ").title()
-        self._attr_name = f"{property_name} {service_display} {sensor_label}"
-        self._attr_unique_id = f"{DOMAIN}_{config_entry.entry_id}_{property_id}_{service_type}_{sensor_type}"
-        
-        # Set device info for grouping
-        self._attr_device_info = {
-            "identifiers": {(DOMAIN, f"{config_entry.entry_id}_{property_id}")},
-            "name": property_name,
-            "manufacturer": "Red Energy",
-            "model": f"{service_display} Service",
-            "via_device": (DOMAIN, config_entry.entry_id),
-        }
+    @property
+    def _property_data(self) -> PropertyEnergyData | None:
+        return self.coordinator.data.get(self._property_id) if self.coordinator.data else None
 
     @property
     def available(self) -> bool:
-        """Return if entity is available."""
-        if not (self.coordinator.last_update_success and self.coordinator.data):
-            _LOGGER.debug("Entity %s unavailable: coordinator not ready", self._attr_unique_id)
-            return False
-        udata = self.coordinator.data.get("usage_data", {})
-        block = udata.get(self._property_id)
-        if not block:
-            _LOGGER.debug("Entity %s unavailable: property %s not in usage_data keys=%s", self._attr_unique_id, self._property_id, list(udata.keys()))
-            return False
-        if self._service_type not in (block.get("services") or {}):
-            _LOGGER.debug("Entity %s unavailable: service %s not in property %s services=%s", self._attr_unique_id, self._service_type, self._property_id, list((block.get("services") or {}).keys()))
-            return False
-        return True
-
-
-class RedEnergyUsageSensor(RedEnergyBaseSensor):
-    """Red Energy current usage sensor."""
-
-    def __init__(
-        self,
-        coordinator: RedEnergyDataCoordinator,
-        config_entry: ConfigEntry,
-        property_id: str,
-        service_type: str,
-    ) -> None:
-        """Initialize the usage sensor."""
-        super().__init__(coordinator, config_entry, property_id, service_type, "daily_usage")
-        
-        # Set appropriate device class and unit
-        if service_type == SERVICE_TYPE_ELECTRICITY:
-            self._attr_device_class = SensorDeviceClass.ENERGY
-            self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
-            self._attr_state_class = SensorStateClass.TOTAL_INCREASING
-        elif service_type == SERVICE_TYPE_GAS:
-            self._attr_device_class = SensorDeviceClass.ENERGY
-            self._attr_native_unit_of_measurement = "MJ"  # Megajoules
-            self._attr_state_class = SensorStateClass.TOTAL_INCREASING
+        return self._property_data is not None and super().available
 
     @property
-    def native_value(self) -> Optional[float]:
-        """Return the current daily usage."""
-        return self.coordinator.get_latest_usage(self._property_id, self._service_type)
-
-    @property
-    def extra_state_attributes(self) -> Optional[dict[str, Any]]:
-        """Return extra state attributes."""
-        service_data = self.coordinator.get_service_usage(self._property_id, self._service_type)
-        if not service_data:
+    def native_value(self) -> float | None:
+        property_data = self._property_data
+        if not property_data:
             return None
-        
+
+        period = _select_period(property_data.breakdown, self.entity_description.period)
+        if period is None:
+            return None
+
+        if self.entity_description.metric == "generation":
+            return period.generation_kwh
+        return period.consumption_kwh
+
+    @property
+    def extra_state_attributes(self) -> dict[str, object] | None:
+        property_data = self._property_data
+        if not property_data:
+            return None
+
+        period = _select_period(property_data.breakdown, self.entity_description.period)
+        if period is None:
+            return None
+
         return {
-            "consumer_number": service_data.get("consumer_number"),
-            "last_updated": service_data.get("last_updated"),
-            "service_type": self._service_type,
+            "property_id": property_data.property_id,
+            "period_start": period.start.isoformat(),
+            "period_end": period.end.isoformat(),
+            "metric": self.entity_description.metric,
+            "last_updated": property_data.last_updated.isoformat(),
+        }
+
+    @property
+    def device_info(self) -> dict[str, object] | None:
+        property_data = self._property_data
+        if not property_data:
+            return None
+        return {
+            "identifiers": {(DOMAIN, property_data.property_id)},
+            "name": property_data.name,
+            "manufacturer": "Red Energy",
         }
 
 
-class RedEnergyCostSensor(RedEnergyBaseSensor):
-    """Red Energy total cost sensor."""
-
-    def __init__(
-        self,
-        coordinator: RedEnergyDataCoordinator,
-        config_entry: ConfigEntry,
-        property_id: str,
-        service_type: str,
-    ) -> None:
-        """Initialize the cost sensor."""
-        super().__init__(coordinator, config_entry, property_id, service_type, "total_cost")
-        
-        self._attr_device_class = SensorDeviceClass.MONETARY
-        self._attr_native_unit_of_measurement = "AUD"
-        self._attr_state_class = SensorStateClass.TOTAL
-
-    @property
-    def native_value(self) -> Optional[float]:
-        """Return the total cost."""
-        return self.coordinator.get_total_cost(self._property_id, self._service_type)
-
-    @property
-    def extra_state_attributes(self) -> Optional[dict[str, Any]]:
-        """Return extra state attributes."""
-        service_data = self.coordinator.get_service_usage(self._property_id, self._service_type)
-        if not service_data:
-            return None
-        
-        return {
-            "consumer_number": service_data.get("consumer_number"),
-            "last_updated": service_data.get("last_updated"),
-            "service_type": self._service_type,
-            "period": "30 days",
-        }
-
-
-class RedEnergyTotalUsageSensor(RedEnergyBaseSensor):
-    """Red Energy total usage sensor (30-day period)."""
-
-    def __init__(
-        self,
-        coordinator: RedEnergyDataCoordinator,
-        config_entry: ConfigEntry,
-        property_id: str,
-        service_type: str,
-    ) -> None:
-        """Initialize the total usage sensor."""
-        super().__init__(coordinator, config_entry, property_id, service_type, "total_usage")
-        
-        # Set appropriate device class and unit
-        if service_type == SERVICE_TYPE_ELECTRICITY:
-            self._attr_device_class = SensorDeviceClass.ENERGY
-            self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
-        elif service_type == SERVICE_TYPE_GAS:
-            self._attr_device_class = SensorDeviceClass.ENERGY
-            self._attr_native_unit_of_measurement = "MJ"  # Megajoules
-            
-        self._attr_state_class = SensorStateClass.TOTAL
-
-    @property
-    def native_value(self) -> Optional[float]:
-        """Return the total usage."""
-        return self.coordinator.get_total_usage(self._property_id, self._service_type)
-
-    @property
-    def extra_state_attributes(self) -> Optional[dict[str, Any]]:
-        """Return extra state attributes."""
-        service_data = self.coordinator.get_service_usage(self._property_id, self._service_type)
-        if not service_data:
-            return None
-        
-        usage_data = service_data.get("usage_data", {})
-        daily_data = usage_data.get("usage_data", [])
-        
-        return {
-            "consumer_number": service_data.get("consumer_number"),
-            "last_updated": service_data.get("last_updated"),
-            "service_type": self._service_type,
-            "period": "30 days",
-            "daily_count": len(daily_data),
-            "from_date": usage_data.get("from_date"),
-            "to_date": usage_data.get("to_date"),
-        }
-
-
-class RedEnergyTotalGenerationSensor(RedEnergyBaseSensor):
-    """Red Energy total solar generation sensor (30-day period)."""
-
-    def __init__(
-        self,
-        coordinator: RedEnergyDataCoordinator,
-        config_entry: ConfigEntry,
-        property_id: str,
-        service_type: str,
-    ) -> None:
-        """Initialize the total generation sensor."""
-        super().__init__(coordinator, config_entry, property_id, service_type, "solar_generation")
-
-        self._attr_device_class = SensorDeviceClass.ENERGY
-        self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
-        self._attr_state_class = SensorStateClass.TOTAL
-        self._attr_icon = "mdi:solar-power"
-
-    @property
-    def native_value(self) -> Optional[float]:
-        """Return the total solar generation."""
-        return self.coordinator.get_total_generation(self._property_id, self._service_type)
-
-    @property
-    def extra_state_attributes(self) -> Optional[dict[str, Any]]:
-        service_data = self.coordinator.get_service_usage(self._property_id, self._service_type)
-        if not service_data:
-            return None
-
-        usage_data = service_data.get("usage_data", {})
-        daily_data = usage_data.get("usage_data", [])
-
-        return {
-            "consumer_number": service_data.get("consumer_number"),
-            "last_updated": service_data.get("last_updated"),
-            "service_type": self._service_type,
-            "period": "30 days",
-            "daily_generation_points": sum(1 for entry in daily_data if entry.get("generation")),
-            "total_generation_value": usage_data.get("total_generation_value", 0.0),
-        }
-
-
-class RedEnergyGenerationValueSensor(RedEnergyBaseSensor):
-    """Red Energy solar generation monetary value sensor."""
-
-    def __init__(
-        self,
-        coordinator: RedEnergyDataCoordinator,
-        config_entry: ConfigEntry,
-        property_id: str,
-        service_type: str,
-    ) -> None:
-        """Initialize the generation value sensor."""
-        super().__init__(coordinator, config_entry, property_id, service_type, "solar_generation_value")
-
-        self._attr_device_class = SensorDeviceClass.MONETARY
-        self._attr_native_unit_of_measurement = "AUD"
-        self._attr_state_class = SensorStateClass.TOTAL
-        self._attr_icon = "mdi:currency-usd"
-
-    @property
-    def native_value(self) -> Optional[float]:
-        """Return the monetary value of solar generation."""
-        return self.coordinator.get_total_generation_value(self._property_id, self._service_type)
-
-    @property
-    def extra_state_attributes(self) -> Optional[dict[str, Any]]:
-        service_data = self.coordinator.get_service_usage(self._property_id, self._service_type)
-        if not service_data:
-            return None
-
-        usage_data = service_data.get("usage_data", {})
-
-        return {
-            "consumer_number": service_data.get("consumer_number"),
-            "last_updated": service_data.get("last_updated"),
-            "service_type": self._service_type,
-            "period": "30 days",
-            "total_generation": usage_data.get("total_generation", 0.0),
-        }
-
-
-class RedEnergyDailySolarGenerationSensor(RedEnergyBaseSensor):
-    """Red Energy daily solar generation sensor."""
-
-    def __init__(
-        self,
-        coordinator: RedEnergyDataCoordinator,
-        config_entry: ConfigEntry,
-        property_id: str,
-        service_type: str,
-    ) -> None:
-        super().__init__(coordinator, config_entry, property_id, service_type, "daily_solar_generation")
-
-        self._attr_device_class = SensorDeviceClass.ENERGY
-        self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
-        self._attr_state_class = SensorStateClass.MEASUREMENT
-        self._attr_icon = "mdi:solar-power"
-
-    @property
-    def native_value(self) -> Optional[float]:
-        latest = self.coordinator.get_latest_daily_entry(self._property_id, self._service_type)
-        if not latest:
-            return None
-        return latest.get("generation_kwh")
-
-    @property
-    def extra_state_attributes(self) -> Optional[dict[str, Any]]:
-        latest = self.coordinator.get_latest_daily_entry(self._property_id, self._service_type)
-        if not latest:
-            return None
-        summary = self.coordinator.get_daily_summary(self._property_id, self._service_type) or {}
-        return {
-            "date": latest.get("date"),
-            "consumption_kwh": latest.get("consumption_kwh"),
-            "consumption_cost": latest.get("consumption_cost"),
-            "generation_value": latest.get("generation_value"),
-            "total_generation_kwh": summary.get("total_generation_kwh"),
-        }
-
-
-class RedEnergyDailySolarValueSensor(RedEnergyBaseSensor):
-    """Red Energy daily solar generation value sensor."""
-
-    def __init__(
-        self,
-        coordinator: RedEnergyDataCoordinator,
-        config_entry: ConfigEntry,
-        property_id: str,
-        service_type: str,
-    ) -> None:
-        super().__init__(coordinator, config_entry, property_id, service_type, "daily_solar_value")
-
-        self._attr_device_class = SensorDeviceClass.MONETARY
-        self._attr_native_unit_of_measurement = "AUD"
-        self._attr_state_class = SensorStateClass.MEASUREMENT
-        self._attr_icon = "mdi:currency-usd"
-
-    @property
-    def native_value(self) -> Optional[float]:
-        latest = self.coordinator.get_latest_daily_entry(self._property_id, self._service_type)
-        if not latest:
-            return None
-        return latest.get("generation_value")
-
-    @property
-    def extra_state_attributes(self) -> Optional[dict[str, Any]]:
-        latest = self.coordinator.get_latest_daily_entry(self._property_id, self._service_type)
-        if not latest:
-            return None
-        return {
-            "date": latest.get("date"),
-            "generation_kwh": latest.get("generation_kwh"),
-            "carbon_emissions": latest.get("carbon_emissions"),
-        }
-
-
-class RedEnergyDailyCarbonSensor(RedEnergyBaseSensor):
-    """Red Energy daily carbon emission sensor."""
-
-    def __init__(
-        self,
-        coordinator: RedEnergyDataCoordinator,
-        config_entry: ConfigEntry,
-        property_id: str,
-        service_type: str,
-    ) -> None:
-        super().__init__(coordinator, config_entry, property_id, service_type, "daily_carbon_emissions")
-
-        self._attr_native_unit_of_measurement = "t"
-        self._attr_state_class = SensorStateClass.MEASUREMENT
-        self._attr_icon = "mdi:molecule-co2"
-
-    @property
-    def native_value(self) -> Optional[float]:
-        latest = self.coordinator.get_latest_daily_entry(self._property_id, self._service_type)
-        if not latest:
-            return None
-        return latest.get("carbon_emissions")
-
-    @property
-    def extra_state_attributes(self) -> Optional[dict[str, Any]]:
-        latest = self.coordinator.get_latest_daily_entry(self._property_id, self._service_type)
-        if not latest:
-            return None
-        return {
-            "date": latest.get("date"),
-            "generation_kwh": latest.get("generation_kwh"),
-            "consumption_kwh": latest.get("consumption_kwh"),
-        }
-
-
-class RedEnergyMonthlyConsumptionSensor(RedEnergyBaseSensor):
-    """Red Energy monthly consumption sensor."""
-
-    def __init__(
-        self,
-        coordinator: RedEnergyDataCoordinator,
-        config_entry: ConfigEntry,
-        property_id: str,
-        service_type: str,
-    ) -> None:
-        super().__init__(coordinator, config_entry, property_id, service_type, "monthly_consumption")
-
-        self._attr_device_class = SensorDeviceClass.ENERGY
-        self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
-        self._attr_state_class = SensorStateClass.TOTAL
-        self._attr_icon = "mdi:chart-line"
-
-    @property
-    def native_value(self) -> Optional[float]:
-        latest = self.coordinator.get_latest_monthly_entry(self._property_id, self._service_type)
-        if not latest:
-            return None
-        return latest.get("consumption_kwh")
-
-    @property
-    def extra_state_attributes(self) -> Optional[dict[str, Any]]:
-        latest = self.coordinator.get_latest_monthly_entry(self._property_id, self._service_type)
-        if not latest:
-            return None
-        summary = self.coordinator.get_monthly_summary(self._property_id, self._service_type) or {}
-        return {
-            "from_date": latest.get("from_date"),
-            "to_date": latest.get("to_date"),
-            "consumption_cost": latest.get("consumption_cost"),
-            "total_consumption_kwh": summary.get("total_consumption_kwh"),
-        }
-
-
-class RedEnergyMonthlyGenerationSensor(RedEnergyBaseSensor):
-    """Red Energy monthly solar generation sensor."""
-
-    def __init__(
-        self,
-        coordinator: RedEnergyDataCoordinator,
-        config_entry: ConfigEntry,
-        property_id: str,
-        service_type: str,
-    ) -> None:
-        super().__init__(coordinator, config_entry, property_id, service_type, "monthly_solar_generation")
-
-        self._attr_device_class = SensorDeviceClass.ENERGY
-        self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
-        self._attr_state_class = SensorStateClass.TOTAL
-        self._attr_icon = "mdi:solar-panel"
-
-    @property
-    def native_value(self) -> Optional[float]:
-        latest = self.coordinator.get_latest_monthly_entry(self._property_id, self._service_type)
-        if not latest:
-            return None
-        return latest.get("generation_kwh")
-
-    @property
-    def extra_state_attributes(self) -> Optional[dict[str, Any]]:
-        latest = self.coordinator.get_latest_monthly_entry(self._property_id, self._service_type)
-        if not latest:
-            return None
-        summary = self.coordinator.get_monthly_summary(self._property_id, self._service_type) or {}
-        return {
-            "from_date": latest.get("from_date"),
-            "to_date": latest.get("to_date"),
-            "generation_value": latest.get("generation_value"),
-            "total_generation_kwh": summary.get("total_generation_kwh"),
-        }
-
-
-class RedEnergyMonthlyGenerationValueSensor(RedEnergyBaseSensor):
-    """Red Energy monthly solar generation value sensor."""
-
-    def __init__(
-        self,
-        coordinator: RedEnergyDataCoordinator,
-        config_entry: ConfigEntry,
-        property_id: str,
-        service_type: str,
-    ) -> None:
-        super().__init__(coordinator, config_entry, property_id, service_type, "monthly_solar_value")
-
-        self._attr_device_class = SensorDeviceClass.MONETARY
-        self._attr_native_unit_of_measurement = "AUD"
-        self._attr_state_class = SensorStateClass.TOTAL
-        self._attr_icon = "mdi:currency-usd"
-
-    @property
-    def native_value(self) -> Optional[float]:
-        latest = self.coordinator.get_latest_monthly_entry(self._property_id, self._service_type)
-        if not latest:
-            return None
-        return latest.get("generation_value")
-
-    @property
-    def extra_state_attributes(self) -> Optional[dict[str, Any]]:
-        latest = self.coordinator.get_latest_monthly_entry(self._property_id, self._service_type)
-        if not latest:
-            return None
-        return {
-            "from_date": latest.get("from_date"),
-            "to_date": latest.get("to_date"),
-            "generation_kwh": latest.get("generation_kwh"),
-        }
-
-
-class RedEnergyMonthlyChargesSensor(RedEnergyBaseSensor):
-    """Red Energy monthly total charges sensor."""
-
-    def __init__(
-        self,
-        coordinator: RedEnergyDataCoordinator,
-        config_entry: ConfigEntry,
-        property_id: str,
-        service_type: str,
-    ) -> None:
-        super().__init__(coordinator, config_entry, property_id, service_type, "monthly_total_charges")
-
-        self._attr_device_class = SensorDeviceClass.MONETARY
-        self._attr_native_unit_of_measurement = "AUD"
-        self._attr_state_class = SensorStateClass.TOTAL
-        self._attr_icon = "mdi:cash"
-
-    @property
-    def native_value(self) -> Optional[float]:
-        latest = self.coordinator.get_latest_monthly_entry(self._property_id, self._service_type)
-        if not latest:
-            return None
-        return latest.get("total_charges")
-
-    @property
-    def extra_state_attributes(self) -> Optional[dict[str, Any]]:
-        latest = self.coordinator.get_latest_monthly_entry(self._property_id, self._service_type)
-        if not latest:
-            return None
-        return {
-            "from_date": latest.get("from_date"),
-            "to_date": latest.get("to_date"),
-            "service_charge": latest.get("service_charge"),
-            "gst": latest.get("gst"),
-        }
-
-
-class RedEnergyMonthlyCarbonSensor(RedEnergyBaseSensor):
-    """Red Energy monthly carbon emission sensor."""
-
-    def __init__(
-        self,
-        coordinator: RedEnergyDataCoordinator,
-        config_entry: ConfigEntry,
-        property_id: str,
-        service_type: str,
-    ) -> None:
-        super().__init__(coordinator, config_entry, property_id, service_type, "monthly_carbon_emissions")
-
-        self._attr_native_unit_of_measurement = "t"
-        self._attr_state_class = SensorStateClass.MEASUREMENT
-        self._attr_icon = "mdi:molecule-co2"
-
-    @property
-    def native_value(self) -> Optional[float]:
-        latest = self.coordinator.get_latest_monthly_entry(self._property_id, self._service_type)
-        if not latest:
-            return None
-        return latest.get("carbon_emissions")
-
-    @property
-    def extra_state_attributes(self) -> Optional[dict[str, Any]]:
-        latest = self.coordinator.get_latest_monthly_entry(self._property_id, self._service_type)
-        if not latest:
-            return None
-        summary = self.coordinator.get_monthly_summary(self._property_id, self._service_type) or {}
-        return {
-            "from_date": latest.get("from_date"),
-            "to_date": latest.get("to_date"),
-            "total_carbon_emissions": summary.get("total_carbon_emissions"),
-        }
-
-
-class RedEnergyDailyAverageSensor(RedEnergyBaseSensor):
-    """Red Energy daily average usage sensor."""
-
-    def __init__(
-        self,
-        coordinator: RedEnergyDataCoordinator,
-        config_entry: ConfigEntry,
-        property_id: str,
-        service_type: str,
-    ) -> None:
-        """Initialize the daily average sensor."""
-        super().__init__(coordinator, config_entry, property_id, service_type, SENSOR_TYPE_DAILY_AVERAGE)
-        
-        # Set appropriate device class and unit
-        if service_type == SERVICE_TYPE_ELECTRICITY:
-            self._attr_device_class = SensorDeviceClass.ENERGY
-            self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
-        elif service_type == SERVICE_TYPE_GAS:
-            self._attr_device_class = SensorDeviceClass.ENERGY
-            self._attr_native_unit_of_measurement = "MJ"
-            
-        self._attr_state_class = SensorStateClass.MEASUREMENT
-
-    @property
-    def native_value(self) -> Optional[float]:
-        """Return the daily average usage."""
-        service_data = self.coordinator.get_service_usage(self._property_id, self._service_type)
-        if not service_data or "usage_data" not in service_data:
-            return None
-        
-        usage_data = service_data["usage_data"].get("usage_data", [])
-        if not usage_data:
-            return None
-        
-        # Calculate average daily usage
-        total_usage = sum(entry.get("usage", 0) for entry in usage_data)
-        return round(total_usage / len(usage_data), 2) if usage_data else 0
-
-    @property
-    def extra_state_attributes(self) -> Optional[dict[str, Any]]:
-        """Return extra state attributes."""
-        service_data = self.coordinator.get_service_usage(self._property_id, self._service_type)
-        if not service_data:
-            return None
-        
-        usage_data = service_data["usage_data"].get("usage_data", [])
-        return {
-            "consumer_number": service_data.get("consumer_number"),
-            "calculation_period": f"{len(usage_data)} days",
-            "service_type": self._service_type,
-        }
-
-
-class RedEnergyMonthlyAverageSensor(RedEnergyBaseSensor):
-    """Red Energy monthly average usage sensor."""
-
-    def __init__(
-        self,
-        coordinator: RedEnergyDataCoordinator,
-        config_entry: ConfigEntry,
-        property_id: str,
-        service_type: str,
-    ) -> None:
-        """Initialize the monthly average sensor."""
-        super().__init__(coordinator, config_entry, property_id, service_type, SENSOR_TYPE_MONTHLY_AVERAGE)
-        
-        if service_type == SERVICE_TYPE_ELECTRICITY:
-            self._attr_device_class = SensorDeviceClass.ENERGY
-            self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
-        elif service_type == SERVICE_TYPE_GAS:
-            self._attr_device_class = SensorDeviceClass.ENERGY
-            self._attr_native_unit_of_measurement = "MJ"
-            
-        self._attr_state_class = SensorStateClass.MEASUREMENT
-
-    @property
-    def native_value(self) -> Optional[float]:
-        """Return the estimated monthly average usage."""
-        total_usage = self.coordinator.get_total_usage(self._property_id, self._service_type)
-        if total_usage is None:
-            return None
-        
-        # Project 30-day usage to monthly (30.44 days average)
-        return round(total_usage * (30.44 / 30), 2)
-
-
-class RedEnergyPeakUsageSensor(RedEnergyBaseSensor):
-    """Red Energy peak daily usage sensor."""
-
-    def __init__(
-        self,
-        coordinator: RedEnergyDataCoordinator,
-        config_entry: ConfigEntry,
-        property_id: str,
-        service_type: str,
-    ) -> None:
-        """Initialize the peak usage sensor."""
-        super().__init__(coordinator, config_entry, property_id, service_type, SENSOR_TYPE_PEAK_USAGE)
-        
-        if service_type == SERVICE_TYPE_ELECTRICITY:
-            self._attr_device_class = SensorDeviceClass.ENERGY
-            self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
-        elif service_type == SERVICE_TYPE_GAS:
-            self._attr_device_class = SensorDeviceClass.ENERGY
-            self._attr_native_unit_of_measurement = "MJ"
-            
-        self._attr_state_class = SensorStateClass.MEASUREMENT
-
-    @property
-    def native_value(self) -> Optional[float]:
-        """Return the peak daily usage."""
-        service_data = self.coordinator.get_service_usage(self._property_id, self._service_type)
-        if not service_data or "usage_data" not in service_data:
-            return None
-        
-        usage_data = service_data["usage_data"].get("usage_data", [])
-        if not usage_data:
-            return None
-        
-        # Find peak daily usage
-        usage_values = [entry.get("usage", 0) for entry in usage_data]
-        return max(usage_values) if usage_values else 0
-
-    @property
-    def extra_state_attributes(self) -> Optional[dict[str, Any]]:
-        """Return extra state attributes."""
-        service_data = self.coordinator.get_service_usage(self._property_id, self._service_type)
-        if not service_data or "usage_data" not in service_data:
-            return None
-        
-        usage_data = service_data["usage_data"].get("usage_data", [])
-        if not usage_data:
-            return None
-        
-        # Find peak date
-        peak_entry = max(usage_data, key=lambda x: x.get("usage", 0))
-        
-        return {
-            "consumer_number": service_data.get("consumer_number"),
-            "peak_date": peak_entry.get("date"),
-            "peak_cost": peak_entry.get("cost"),
-            "service_type": self._service_type,
-        }
-
-
-class RedEnergyEfficiencySensor(RedEnergyBaseSensor):
-    """Red Energy efficiency rating sensor."""
-
-    def __init__(
-        self,
-        coordinator: RedEnergyDataCoordinator,
-        config_entry: ConfigEntry,
-        property_id: str,
-        service_type: str,
-    ) -> None:
-        """Initialize the efficiency sensor."""
-        super().__init__(coordinator, config_entry, property_id, service_type, SENSOR_TYPE_EFFICIENCY)
-        
-        self._attr_native_unit_of_measurement = "%"
-        self._attr_state_class = SensorStateClass.MEASUREMENT
-        self._attr_icon = "mdi:leaf"
-
-    @property
-    def native_value(self) -> Optional[float]:
-        """Return the efficiency rating (0-100%)."""
-        service_data = self.coordinator.get_service_usage(self._property_id, self._service_type)
-        if not service_data or "usage_data" not in service_data:
-            return None
-        
-        usage_data = service_data["usage_data"].get("usage_data", [])
-        if len(usage_data) < 7:  # Need at least a week of data
-            return None
-        
-        # Calculate efficiency based on usage consistency and trends
-        usage_values = [entry.get("usage", 0) for entry in usage_data]
-        
-        # Calculate coefficient of variation (lower is more efficient/consistent)
-        if not usage_values or len(usage_values) < 2:
-            return None
-        
-        mean_usage = sum(usage_values) / len(usage_values)
-        if mean_usage == 0:
-            return 100  # Perfect efficiency if no usage
-        
-        variance = sum((x - mean_usage) ** 2 for x in usage_values) / len(usage_values)
-        std_dev = variance ** 0.5
-        cv = std_dev / mean_usage
-        
-        # Convert to efficiency score (0-100%, where lower CV = higher efficiency)
-        efficiency = max(0, min(100, 100 - (cv * 100)))
-        return round(efficiency, 1)
-
-    @property
-    def extra_state_attributes(self) -> Optional[dict[str, Any]]:
-        """Return extra state attributes."""
-        service_data = self.coordinator.get_service_usage(self._property_id, self._service_type)
-        if not service_data or "usage_data" not in service_data:
-            return None
-        
-        usage_data = service_data["usage_data"].get("usage_data", [])
-        if not usage_data:
-            return None
-        
-        usage_values = [entry.get("usage", 0) for entry in usage_data]
-        mean_usage = sum(usage_values) / len(usage_values) if usage_values else 0
-        
-        return {
-            "consumer_number": service_data.get("consumer_number"),
-            "mean_daily_usage": round(mean_usage, 2),
-            "usage_variation": "Low" if self.native_value and self.native_value > 80 else 
-                             "Medium" if self.native_value and self.native_value > 60 else "High",
-            "calculation_days": len(usage_data),
-            "service_type": self._service_type,
-        }
+def _select_period(breakdown: EnergyBreakdown, period_key: str) -> EnergyPeriod | None:
+    if period_key == "daily":
+        return breakdown.daily
+    if period_key == "weekly":
+        return breakdown.weekly
+    if period_key == "monthly":
+        return breakdown.monthly
+    return None

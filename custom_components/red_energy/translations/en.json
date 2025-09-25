@@ -1,52 +1,64 @@
 {
   "config": {
-    "step": {
-      "user": {
-        "title": "Red Energy Setup",
-        "description": "Enter your Red Energy credentials. You'll need to obtain the client_id from your mobile app using network monitoring tools.",
-        "data": {
-          "username": "Username (Email)",
-          "password": "Password", 
-          "client_id": "Client ID"
-        },
-        "data_description": {
-          "client_id": "Capture this from your Red Energy mobile app using Proxyman or similar network monitoring tool"
-        }
-      },
-      "account_select": {
-        "title": "Select Accounts",
-        "description": "Choose which Red Energy accounts to monitor. Found {account_count} account(s).",
-        "data": {
-          "selected_accounts": "Accounts to Monitor"
-        }
-      },
-      "service_select": {
-        "title": "Select Services",
-        "description": "Choose which services to monitor for your {selected_accounts} selected account(s).",
-        "data": {
-          "services": "Services to Monitor"
-        }
-      }
+    "abort": {
+      "already_configured": "This Red Energy account is already set up.",
+      "no_properties": "No electricity services were found for this account.",
+      "reauth_successful": "Re-authentication was successful."
     },
     "error": {
-      "auth_failed": "Invalid username or password",
-      "cannot_connect": "Failed to connect to Red Energy. Check your internet connection.",
-      "invalid_client_id": "Invalid client ID. Please check the captured client ID from your mobile app.",
-      "unknown": "Unexpected error occurred",
-      "no_accounts": "No Red Energy accounts found for this user",
-      "select_account": "Please select at least one account"
+      "invalid_auth": "Could not authenticate with the supplied credentials.",
+      "cannot_connect": "Unable to communicate with the Red Energy service.",
+      "no_properties": "We were unable to locate any electricity properties for this account.",
+      "select_property": "Select at least one property before continuing."
     },
-    "abort": {
-      "already_configured": "Red Energy account is already configured"
+    "step": {
+      "user": {
+        "title": "Connect to Red Energy",
+        "description": "Enter your Red Energy credentials. The client ID must be captured from the Red Energy mobile application.",
+        "data": {
+          "username": "Username",
+          "password": "Password",
+          "client_id": "Client ID"
+        }
+      },
+      "select_properties": {
+        "title": "Select Properties",
+        "description": "Choose which Red Energy properties Home Assistant should monitor.",
+        "data": {
+          "property_ids": "Properties"
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "red_energy_daily_electricity": {
+        "name": "Daily Electricity"
+      },
+      "red_energy_weekly_electricity": {
+        "name": "Weekly Electricity"
+      },
+      "red_energy_monthly_electricity": {
+        "name": "Monthly Electricity"
+      },
+      "red_energy_daily_solar": {
+        "name": "Daily Solar"
+      },
+      "red_energy_weekly_solar": {
+        "name": "Weekly Solar"
+      },
+      "red_energy_monthly_solar": {
+        "name": "Monthly Solar"
+      }
     }
   },
   "options": {
     "step": {
       "init": {
         "title": "Red Energy Options",
-        "description": "Configure which services to monitor.",
+        "description": "Adjust how frequently the integration refreshes data from Red Energy.",
         "data": {
-          "services": "Services to Monitor"
+          "update_interval": "Update interval"
         }
       }
     }

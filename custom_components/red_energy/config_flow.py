@@ -1,398 +1,214 @@
-"""Config flow for Red Energy integration."""
+"""Config flow for the Red Energy integration."""
 from __future__ import annotations
 
-import logging
-from datetime import timedelta
-from typing import Any, Dict, Optional
+from collections.abc import Mapping
+from dataclasses import dataclass
+from typing import Any
 
-import aiohttp
 import voluptuous as vol
 from homeassistant import config_entries
-from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.const import CONF_CLIENT_ID, CONF_PASSWORD, CONF_USERNAME
+from homeassistant.core import callback
 from homeassistant.data_entry_flow import FlowResult
-from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers import config_validation as cv
 
-from .api import RedEnergyAPI, RedEnergyAPIError, RedEnergyAuthError
-from .data_validation import validate_config_data, DataValidationError
-from .config_migration import CURRENT_CONFIG_VERSION
+from .api import RedEnergyAuthError, RedEnergyClient
 from .const import (
-    CONF_CLIENT_ID,
-    CONF_ENABLE_ADVANCED_SENSORS,
-    CONF_SCAN_INTERVAL,
-    DATA_ACCOUNTS,
-    DATA_CUSTOMER_DATA,
-    DATA_SELECTED_ACCOUNTS,
-    DEFAULT_SCAN_INTERVAL,
+    CONF_PROPERTY_IDS,
+    CONF_UPDATE_INTERVAL,
+    DEFAULT_UPDATE_INTERVAL,
     DOMAIN,
-    ERROR_AUTH_FAILED,
-    ERROR_CANNOT_CONNECT,
-    ERROR_INVALID_CLIENT_ID,
-    ERROR_NO_ACCOUNTS,
-    ERROR_UNKNOWN,
-    SCAN_INTERVAL_OPTIONS,
-    SERVICE_TYPE_ELECTRICITY,
-    SERVICE_TYPE_GAS,
-    STEP_ACCOUNT_SELECT,
-    STEP_SERVICE_SELECT,
-    STEP_USER,
-)
-
-_LOGGER = logging.getLogger(__name__)
-
-STEP_USER_DATA_SCHEMA = vol.Schema(
-    {
-        vol.Required(CONF_USERNAME): str,
-        vol.Required(CONF_PASSWORD): str,
-        vol.Required(CONF_CLIENT_ID): str,
-    }
+    MINIMUM_UPDATE_INTERVAL,
 )
 
 
-async def validate_input(hass: HomeAssistant, data: dict[str, Any]) -> dict[str, Any]:
-    """Validate the user input allows us to connect."""
-    # First validate configuration data format
-    try:
-        validate_config_data(data)
-    except DataValidationError as err:
-        _LOGGER.error(
-            "Configuration validation failed: %s. "
-            "Ensure you have valid Red Energy credentials and client_id from mobile app",
-            err
-        )
-        raise InvalidAuth from err
-    
-    session = async_get_clientsession(hass)
-    # Use real Red Energy API
-    api = RedEnergyAPI(session)
-    
-    try:
-        # Test authentication
-        auth_success = await api.test_credentials(
-            data[CONF_USERNAME],
-            data[CONF_PASSWORD], 
-            data[CONF_CLIENT_ID]
-        )
-        
-        if not auth_success:
-            _LOGGER.error(
-                "Authentication failed for user %s - credentials rejected by Red Energy API. "
-                "Please verify: 1) Username/password are correct, 2) Client ID is valid and captured correctly from mobile app",
-                data[CONF_USERNAME]
-            )
-            raise InvalidAuth
-        
-        # Get customer data and properties
-        customer_data = await api.get_customer_data()
-        properties = await api.get_properties()
-        
-        if not properties:
-            raise NoAccounts
-        
-        # Return info that you want to store in the config entry.
-        return {
-            DATA_CUSTOMER_DATA: customer_data,
-            DATA_ACCOUNTS: properties,
-            "title": customer_data.get("name", "Red Energy Account")
-        }
-    except RedEnergyAuthError as err:
-        _LOGGER.error(
-            "Red Energy authentication error for user %s: %s. "
-            "This typically indicates invalid credentials or client_id. "
-            "Verify username/password work in Red Energy app and client_id is correctly captured.",
-            data[CONF_USERNAME], err
-        )
-        raise InvalidAuth from err
-    except RedEnergyAPIError as err:
-        _LOGGER.error(
-            "Red Energy API error for user %s: %s. "
-            "This may indicate network issues, API unavailability, or invalid API responses.",
-            data[CONF_USERNAME], err
-        )
-        raise CannotConnect from err
-    except Exception as err:
-        _LOGGER.exception(
-            "Unexpected error during Red Energy validation for user %s: %s. "
-            "This may indicate a bug in the integration or unexpected API behavior.",
-            data[CONF_USERNAME], err
-        )
-        raise UnknownError from err
+@dataclass(slots=True)
+class _DiscoveredProperty:
+    identifier: str
+    name: str
 
 
-class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
-    """Handle a config flow for Red Energy."""
+def _normalise_property(raw: Mapping[str, Any]) -> _DiscoveredProperty | None:
+    for key in ("id", "propertyNumber", "propertyId", "accountNumber", "accountId"):
+        identifier = raw.get(key)
+        if identifier:
+            break
+    else:
+        return None
 
-    VERSION = CURRENT_CONFIG_VERSION
-    
-    @staticmethod
-    async def async_migrate_entry(hass: HomeAssistant, config_entry: config_entries.ConfigEntry) -> bool:
-        """Migrate old entry."""
-        _LOGGER.debug(
-            "ConfigFlow migration requested for entry %s at version %s",
-            config_entry.entry_id,
-            config_entry.version,
-        )
+    for key in ("name", "displayName"):
+        name = raw.get(key)
+        if name:
+            break
+    else:
+        address = raw.get("address") or {}
+        display = address.get("displayAddress") or address.get("gentrackDisplayAddress")
+        name = str(display).replace("\n", ", ") if display else f"Property {identifier}"
 
-        if config_entry.version >= CURRENT_CONFIG_VERSION:
-            return True
+    return _DiscoveredProperty(identifier=str(identifier), name=str(name))
 
-        from .config_migration import RedEnergyConfigMigrator
 
-        migrator = RedEnergyConfigMigrator(hass)
-        return await migrator.async_migrate_config_entry(config_entry)
+class RedEnergyConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
+    """Handle configuration of the integration."""
+
+    VERSION = 1
 
     def __init__(self) -> None:
-        """Initialize the config flow."""
-        self._user_data: Dict[str, Any] = {}
-        self._customer_data: Dict[str, Any] = {}
-        self._accounts: list[Dict[str, Any]] = []
-        self._selected_accounts: list[str] = []
+        self._stored_user_input: dict[str, Any] = {}
+        self._properties: list[_DiscoveredProperty] = []
+        self._reauth_entry: config_entries.ConfigEntry | None = None
 
-    async def async_step_user(
-        self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
-        """Handle the initial step."""
+    async def async_step_user(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         errors: dict[str, str] = {}
-        
-        if user_input is not None:
-            try:
-                info = await validate_input(self.hass, user_input)
-            except CannotConnect:
-                errors["base"] = ERROR_CANNOT_CONNECT
-            except InvalidAuth:
-                errors["base"] = ERROR_AUTH_FAILED
-            except InvalidClientId:
-                errors[CONF_CLIENT_ID] = ERROR_INVALID_CLIENT_ID
-            except NoAccounts:
-                errors["base"] = ERROR_NO_ACCOUNTS
-            except UnknownError:
-                errors["base"] = ERROR_UNKNOWN
-            else:
-                # Store user input and validation results
-                self._user_data = user_input
-                self._customer_data = info[DATA_CUSTOMER_DATA]
-                self._accounts = info[DATA_ACCOUNTS]
-                
-                # Check if we already have this account configured
-                await self.async_set_unique_id(
-                    f"{user_input[CONF_USERNAME]}_{user_input[CONF_CLIENT_ID]}"
-                )
-                self._abort_if_unique_id_configured()
-                
-                # Move to account selection
-                if len(self._accounts) == 1:
-                    # Only one account, auto-select it
-                    account_id = self._accounts[0].get("accountNumber")
-                    _LOGGER.info("Account ID: %s", account_id)
-                    if account_id:
-                        self._selected_accounts = [str(account_id)]
-                        return await self.async_step_service_select()
-                    else:
-                        _LOGGER.error("Single account found but no ID available: %s", self._accounts[0])
-                        return await self.async_step_account_select()
-                else:
-                    return await self.async_step_account_select()
 
-        return self.async_show_form(
-            step_id=STEP_USER,
-            data_schema=STEP_USER_DATA_SCHEMA,
-            errors=errors,
-            description_placeholders={
-                "client_id_help": "You need to capture the client_id from your Red Energy mobile app using a network monitoring tool like Proxyman."
-            }
-        )
-
-    async def async_step_account_select(
-        self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
-        """Handle account selection."""
-        errors: dict[str, str] = {}
-        
-        if user_input is not None:
-            selected = user_input.get(DATA_SELECTED_ACCOUNTS, [])
-            if not selected:
-                errors[DATA_SELECTED_ACCOUNTS] = "select_account"
-            else:
-                self._selected_accounts = selected
-                return await self.async_step_service_select()
-
-        # Build account selection options
-        account_options = {}
-        for account in self._accounts:
-            account_id = account.get("accountNumber", "unknown")
-            account_name = account.get("name", f"Account {account_id}")
-            address = account.get("address", {})
-            display_name = f"{account_name}"
-            if address:
-                display_name += f" - {address.get('street', '')}, {address.get('city', '')}"
-            account_options[account_id] = display_name
-
-        schema = vol.Schema({
-            vol.Required(DATA_SELECTED_ACCOUNTS): cv.multi_select(account_options),
-        })
-
-        return self.async_show_form(
-            step_id=STEP_ACCOUNT_SELECT,
-            data_schema=schema,
-            errors=errors,
-            description_placeholders={
-                "account_count": str(len(self._accounts))
-            }
-        )
-
-    async def async_step_service_select(
-        self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
-        """Handle service type selection."""
-        if user_input is not None:
-            # Combine all configuration data
-            config_data = {
-                **self._user_data,
-                DATA_SELECTED_ACCOUNTS: self._selected_accounts,
-                "services": user_input.get("services", [SERVICE_TYPE_ELECTRICITY])
-            }
-            
-            title = self._customer_data.get("name", "Red Energy")
-            if len(self._selected_accounts) > 1:
-                title += f" ({len(self._selected_accounts)} accounts)"
-                
-            return self.async_create_entry(
-                title=title,
-                data=config_data
+        if user_input is None:
+            return self.async_show_form(
+                step_id="user",
+                data_schema=vol.Schema(
+                    {
+                        vol.Required(CONF_USERNAME): str,
+                        vol.Required(CONF_PASSWORD): str,
+                        vol.Required(CONF_CLIENT_ID): str,
+                    }
+                ),
             )
 
-        # Service selection schema
-        service_options = {
-            SERVICE_TYPE_ELECTRICITY: "Electricity",
-            SERVICE_TYPE_GAS: "Gas",
-        }
-        
-        schema = vol.Schema({
-            vol.Required("services", default=[SERVICE_TYPE_ELECTRICITY]): cv.multi_select(service_options),
-        })
+        client = RedEnergyClient(
+            async_get_clientsession(self.hass),
+            username=user_input[CONF_USERNAME],
+            password=user_input[CONF_PASSWORD],
+            client_id=user_input[CONF_CLIENT_ID],
+        )
+
+        if not await client.async_test_credentials():
+            errors["base"] = "invalid_auth"
+        else:
+            try:
+                properties = await client.async_get_properties()
+            except RedEnergyAuthError:
+                errors["base"] = "invalid_auth"
+            except Exception:  # noqa: BLE001
+                errors["base"] = "cannot_connect"
+            else:
+                discovered: list[_DiscoveredProperty] = []
+                for raw in properties:
+                    if not isinstance(raw, Mapping):
+                        continue
+                    prop = _normalise_property(raw)
+                    if prop:
+                        discovered.append(prop)
+
+                if not discovered:
+                    errors["base"] = "no_properties"
+                else:
+                    self._stored_user_input = user_input
+                    self._properties = discovered
+                    await self.async_set_unique_id(
+                        f"{user_input[CONF_USERNAME].lower()}_{user_input[CONF_CLIENT_ID]}"
+                    )
+                    if not self._reauth_entry:
+                        self._abort_if_unique_id_configured()
+                    return await self.async_step_select_properties()
 
         return self.async_show_form(
-            step_id=STEP_SERVICE_SELECT,
-            data_schema=schema,
-            description_placeholders={
-                "selected_accounts": str(len(self._selected_accounts))
-            }
+            step_id="user",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_USERNAME, default=user_input.get(CONF_USERNAME, "")): str,
+                    vol.Required(CONF_PASSWORD, default=user_input.get(CONF_PASSWORD, "")): str,
+                    vol.Required(CONF_CLIENT_ID, default=user_input.get(CONF_CLIENT_ID, "")): str,
+                }
+            ),
+            errors=errors,
         )
+
+    async def async_step_select_properties(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+        if not self._properties:
+            return self.async_abort(reason="no_properties")
+
+        choices = {prop.identifier: prop.name for prop in self._properties}
+
+        if user_input is None:
+            return self.async_show_form(
+                step_id="select_properties",
+                data_schema=vol.Schema(
+                    {
+                        vol.Required(CONF_PROPERTY_IDS, default=list(choices.keys())): cv.multi_select(choices),
+                    }
+                ),
+            )
+
+        property_ids = cv.ensure_list(user_input[CONF_PROPERTY_IDS])
+        if not property_ids:
+            return self.async_show_form(
+                step_id="select_properties",
+                data_schema=vol.Schema(
+                    {
+                        vol.Required(CONF_PROPERTY_IDS, default=list(choices.keys())): cv.multi_select(choices),
+                    }
+                ),
+                errors={"base": "select_property"},
+            )
+
+        data = {**self._stored_user_input, CONF_PROPERTY_IDS: property_ids}
+
+        if self._reauth_entry:
+            self.hass.config_entries.async_update_entry(
+                self._reauth_entry,
+                data=data,
+            )
+            await self.hass.config_entries.async_reload(self._reauth_entry.entry_id)
+            return self.async_abort(reason="reauth_successful")
+
+        title = self._properties[0].name if len(property_ids) == 1 else "Red Energy"
+        return self.async_create_entry(title=title, data=data)
+
+    async def async_step_reauth(self, entry_data: Mapping[str, Any]) -> FlowResult:
+        entry_id = self.context.get("entry_id")
+        if entry_id:
+            self._reauth_entry = self.hass.config_entries.async_get_entry(entry_id)
+        return await self.async_step_user(entry_data)
 
     @staticmethod
     @callback
-    def async_get_options_flow(
-        config_entry: config_entries.ConfigEntry,
-    ) -> RedEnergyOptionsFlowHandler:
-        """Create the options flow."""
-        return RedEnergyOptionsFlowHandler(config_entry)
+    def async_get_options_flow(config_entry: config_entries.ConfigEntry) -> config_entries.OptionsFlow:
+        return RedEnergyOptionsFlow(config_entry)
 
 
-class RedEnergyOptionsFlowHandler(config_entries.OptionsFlow):
-    """Red Energy config flow options handler."""
+class RedEnergyOptionsFlow(config_entries.OptionsFlow):
+    """Handle options for the integration."""
 
-    def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
-        """Initialize options flow."""
-        self.config_entry = config_entry
+    def __init__(self, entry: config_entries.ConfigEntry) -> None:
+        self._entry = entry
 
-    async def async_step_init(
-        self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
-        """Manage the options."""
+    async def async_step_init(self, user_input: Mapping[str, Any] | None = None) -> FlowResult:
         if user_input is not None:
-            # Update coordinator polling interval if changed (only if integration is loaded)
-            if DOMAIN in self.hass.data and self.config_entry.entry_id in self.hass.data[DOMAIN]:
-                entry_data = self.hass.data[DOMAIN][self.config_entry.entry_id]
-                coordinator = entry_data["coordinator"]
-                
-                new_interval = user_input.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)
-                # Ensure new_interval is an integer
-                if isinstance(new_interval, str):
-                    try:
-                        new_interval = int(new_interval)
-                    except ValueError:
-                        new_interval = DEFAULT_SCAN_INTERVAL
-                        
-                if new_interval != coordinator.update_interval.total_seconds():
-                    coordinator.update_interval = timedelta(seconds=new_interval)
-                    _LOGGER.info("Updated polling interval to %d seconds", new_interval)
-            else:
-                _LOGGER.debug("Integration not yet loaded, options will be applied on next restart")
-            
-            return self.async_create_entry(title="", data=user_input)
+            return self.async_create_entry(title="", data=dict(user_input))
 
-        # Get current configuration
-        current_services = self.config_entry.data.get("services", [SERVICE_TYPE_ELECTRICITY])
-        current_options = self.config_entry.options
-        current_scan_interval = current_options.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)
-        current_advanced_sensors = current_options.get(CONF_ENABLE_ADVANCED_SENSORS, True)
-        
-        # Ensure current_scan_interval is an integer
-        if isinstance(current_scan_interval, str):
-            try:
-                current_scan_interval = int(current_scan_interval)
-            except ValueError:
-                current_scan_interval = DEFAULT_SCAN_INTERVAL
-        
-        service_options = {
-            SERVICE_TYPE_ELECTRICITY: "Electricity",
-            SERVICE_TYPE_GAS: "Gas",
-        }
-        
-        # Create interval display options
-        interval_options = {}
-        for key, seconds in SCAN_INTERVAL_OPTIONS.items():
-            if seconds == 60:
-                interval_options[key] = "1 minute"
-            elif seconds == 300:
-                interval_options[key] = "5 minutes"
-            elif seconds == 600:
-                interval_options[key] = "10 minutes (default)"
-            elif seconds == 900:
-                interval_options[key] = "15 minutes"
-            elif seconds == 3600:
-                interval_options[key] = "1 hour"
-        
-        schema = vol.Schema({
-            vol.Required("services", default=current_services): cv.multi_select(service_options),
-            vol.Required(CONF_SCAN_INTERVAL, default=current_scan_interval): vol.In(interval_options),
-            vol.Required(CONF_ENABLE_ADVANCED_SENSORS, default=current_advanced_sensors): bool,
-        })
-
-        # Find the display name for current interval
-        current_interval_display = "10 minutes (default)"  # fallback
-        for key, seconds in SCAN_INTERVAL_OPTIONS.items():
-            if seconds == current_scan_interval:
-                if key in interval_options:
-                    current_interval_display = interval_options[key]
-                break
-        
-        return self.async_show_form(
-            step_id="init",
-            data_schema=schema,
-            description_placeholders={
-                "current_interval": current_interval_display,
-            }
+        default_minutes = int(
+            self._entry.options.get(
+                CONF_UPDATE_INTERVAL,
+                DEFAULT_UPDATE_INTERVAL.total_seconds() // 60,
+            )
         )
 
+        interval_options = {
+            15: "15 minutes",
+            30: "30 minutes",
+            60: "60 minutes",
+            120: "120 minutes",
+        }
 
-class CannotConnect(HomeAssistantError):
-    """Error to indicate we cannot connect."""
+        minimum_minutes = int(MINIMUM_UPDATE_INTERVAL.total_seconds() / 60)
+        if minimum_minutes not in interval_options:
+            interval_options[minimum_minutes] = f"{minimum_minutes} minutes"
 
-
-class InvalidAuth(HomeAssistantError):
-    """Error to indicate there is invalid auth."""
-
-
-class InvalidClientId(HomeAssistantError):
-    """Error to indicate invalid client ID."""
-
-
-class NoAccounts(HomeAssistantError):
-    """Error to indicate no accounts found."""
-
-
-class UnknownError(HomeAssistantError):
-    """Error to indicate unknown error."""
+        return self.async_show_form(
+            step_id="init",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_UPDATE_INTERVAL, default=int(default_minutes)): vol.In(interval_options),
+                }
+            ),
+        )

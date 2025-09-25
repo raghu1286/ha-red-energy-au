@@ -1,64 +1,29 @@
 """Constants for the Red Energy integration."""
 from __future__ import annotations
 
+from datetime import timedelta
 from typing import Final
 
+from homeassistant.const import Platform
+
 DOMAIN: Final = "red_energy"
+PLATFORMS: Final = [Platform.SENSOR]
 
-CONF_USERNAME: Final = "username"
-CONF_PASSWORD: Final = "password"
-CONF_CLIENT_ID: Final = "client_id"
+CONF_PROPERTY_IDS: Final = "property_ids"
+CONF_UPDATE_INTERVAL: Final = "update_interval"
 
-DEFAULT_NAME: Final = "Red Energy"
-DEFAULT_SCAN_INTERVAL: Final = 600
+DATA_CLIENT: Final = "client"
+DATA_COORDINATOR: Final = "coordinator"
 
-# Device information
-MANUFACTURER: Final = "Red Energy"
+DEFAULT_UPDATE_INTERVAL: Final = timedelta(minutes=30)
+MINIMUM_UPDATE_INTERVAL: Final = timedelta(minutes=15)
+MAXIMUM_UPDATE_INTERVAL: Final = timedelta(hours=2)
 
-# Polling intervals (seconds)
-SCAN_INTERVAL_OPTIONS: Final = {
-    "1min": 60,
-    "5min": 300,
-    "15min": 900,
-    "30min": 1800,
-    "1hour": 3600,
-}
+STEP_SELECT_PROPERTIES: Final = "select_properties"
 
-# Advanced sensor types
-SENSOR_TYPE_DAILY_AVERAGE: Final = "daily_average"
-SENSOR_TYPE_MONTHLY_AVERAGE: Final = "monthly_average"
-SENSOR_TYPE_PEAK_USAGE: Final = "peak_usage"
-SENSOR_TYPE_EFFICIENCY: Final = "efficiency"
-
-# Configuration options
-CONF_SCAN_INTERVAL: Final = "scan_interval"
-CONF_ENABLE_ADVANCED_SENSORS: Final = "enable_advanced_sensors"
-CONF_COST_THRESHOLDS: Final = "cost_thresholds"
-CONF_USAGE_THRESHOLDS: Final = "usage_thresholds"
-
-ATTR_ACCOUNT_ID: Final = "account_id"
-ATTR_SERVICE_TYPE: Final = "service_type"
-ATTR_USAGE_DATE: Final = "usage_date"
-ATTR_COST: Final = "cost"
-
-SERVICE_TYPE_ELECTRICITY: Final = "electricity"
-SERVICE_TYPE_GAS: Final = "gas"
-
-API_TIMEOUT: Final = 30
-
-# Configuration flow
-STEP_USER: Final = "user"
-STEP_ACCOUNT_SELECT: Final = "account_select"
-STEP_SERVICE_SELECT: Final = "service_select"
-
-# Error messages
-ERROR_AUTH_FAILED: Final = "auth_failed"
-ERROR_CANNOT_CONNECT: Final = "cannot_connect"
-ERROR_INVALID_CLIENT_ID: Final = "invalid_client_id"
-ERROR_UNKNOWN: Final = "unknown"
-ERROR_NO_ACCOUNTS: Final = "no_accounts"
-
-# Data keys
-DATA_ACCOUNTS: Final = "accounts"
-DATA_SELECTED_ACCOUNTS: Final = "selected_accounts"
-DATA_CUSTOMER_DATA: Final = "customer_data"
+SENSOR_KIND_DAILY_ELECTRICITY: Final = "daily_electricity"
+SENSOR_KIND_WEEKLY_ELECTRICITY: Final = "weekly_electricity"
+SENSOR_KIND_MONTHLY_ELECTRICITY: Final = "monthly_electricity"
+SENSOR_KIND_DAILY_SOLAR: Final = "daily_solar"
+SENSOR_KIND_WEEKLY_SOLAR: Final = "weekly_solar"
+SENSOR_KIND_MONTHLY_SOLAR: Final = "monthly_solar"
