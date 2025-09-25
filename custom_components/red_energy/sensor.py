@@ -33,8 +33,8 @@ from .models import EnergyBreakdown, EnergyPeriod, PropertyEnergyData
 class RedEnergySensorDescription(SensorEntityDescription):
     """Describe a Red Energy sensor."""
 
-    period: str
-    metric: str
+    period: str = ""
+    metric: str = ""
 
 
 SENSOR_DESCRIPTIONS: tuple[RedEnergySensorDescription, ...] = (
