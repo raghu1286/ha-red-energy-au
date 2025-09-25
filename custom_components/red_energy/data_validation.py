@@ -486,3 +486,136 @@ def validate_config_data(config: Dict[str, Any]) -> None:
         raise DataValidationError("Client ID appears too short - verify it was captured correctly")
     
     _LOGGER.debug("Configuration validation passed")
+
+
+def validate_daily_usage_summary(data: Any) -> Dict[str, Any]:
+    """Validate daily usage summary data."""
+    if not isinstance(data, list):
+        raise DataValidationError("Daily usage summary must be a list")
+
+    entries: List[Dict[str, Any]] = []
+    total_consumption = 0.0
+    total_cost = 0.0
+    total_generation = 0.0
+    total_generation_value = 0.0
+    total_carbon = 0.0
+
+    for raw_entry in data:
+        if not isinstance(raw_entry, dict):
+            _LOGGER.debug("Skipping invalid daily summary entry: %s", raw_entry)
+            continue
+
+        usage_date = raw_entry.get("usageDate")
+        if not usage_date:
+            _LOGGER.debug("Daily summary entry missing usageDate: %s", raw_entry)
+            continue
+
+        consumption_kwh = float(raw_entry.get("consumptionKwh", raw_entry.get("consumption", 0) or 0))
+        consumption_dollar = float(raw_entry.get("consumptionDollar", 0) or 0)
+        generation_kwh = float(raw_entry.get("generationKwh", 0) or 0)
+        generation_dollar = raw_entry.get("generationDollar")
+        if generation_dollar is None:
+            generation_dollar = raw_entry.get("generationDollarIncGst", 0)
+        generation_dollar = float(generation_dollar or 0)
+        carbon_tonne = float(raw_entry.get("carbonEmissionTonne", 0) or 0)
+
+        entry = {
+            "date": usage_date,
+            "consumption_kwh": round(consumption_kwh, 3),
+            "consumption_cost": round(consumption_dollar, 2),
+            "generation_kwh": round(generation_kwh, 3),
+            "generation_value": round(generation_dollar, 2),
+            "carbon_emissions": round(carbon_tonne, 4),
+            "is_pricing_reliable": bool(raw_entry.get("isPricingReliable", True)),
+        }
+
+        entries.append(entry)
+        total_consumption += entry["consumption_kwh"]
+        total_cost += entry["consumption_cost"]
+        total_generation += entry["generation_kwh"]
+        total_generation_value += entry["generation_value"]
+        total_carbon += entry["carbon_emissions"]
+
+    entries.sort(key=lambda x: x["date"])
+
+    return {
+        "entries": entries,
+        "latest": entries[-1] if entries else {},
+        "total_consumption_kwh": round(total_consumption, 3),
+        "total_cost": round(total_cost, 2),
+        "total_generation_kwh": round(total_generation, 3),
+        "total_generation_value": round(total_generation_value, 2),
+        "total_carbon_emissions": round(total_carbon, 4),
+    }
+
+
+def validate_monthly_usage_summary(data: Any) -> Dict[str, Any]:
+    """Validate monthly usage summary data."""
+    if not isinstance(data, list):
+        raise DataValidationError("Monthly usage summary must be a list")
+
+    entries: List[Dict[str, Any]] = []
+    total_consumption_kwh = 0.0
+    total_consumption_mj = 0.0
+    total_generation_kwh = 0.0
+    total_generation_value = 0.0
+    total_charges = 0.0
+    total_carbon = 0.0
+
+    for raw_entry in data:
+        if not isinstance(raw_entry, dict):
+            _LOGGER.debug("Skipping invalid monthly summary entry: %s", raw_entry)
+            continue
+
+        from_date = raw_entry.get("fromDate")
+        to_date = raw_entry.get("toDate")
+        if not to_date:
+            _LOGGER.debug("Monthly summary entry missing toDate: %s", raw_entry)
+            continue
+
+        consumption_kwh = float(raw_entry.get("consumptionKwh", 0) or 0)
+        consumption_mj = float(raw_entry.get("consumptionMj", 0) or 0)
+        consumption_dollar = float(raw_entry.get("consumptionDollar", 0) or 0)
+        generation_kwh = float(raw_entry.get("generationKwh", 0) or 0)
+        generation_dollar = float(raw_entry.get("generationDollar", 0) or 0)
+        carbon_tonne = float(raw_entry.get("carbonEmissionTonne", 0) or 0)
+        service_charge = float(raw_entry.get("serviceToPropertyDollar", 0) or 0)
+        total_charges_dollar = float(raw_entry.get("totalChargesDollar", 0) or 0)
+        gst_dollar = float(raw_entry.get("gstDollar", 0) or 0)
+
+        entry = {
+            "from_date": from_date,
+            "to_date": to_date,
+            "consumption_kwh": round(consumption_kwh, 3),
+            "consumption_mj": round(consumption_mj, 3),
+            "consumption_cost": round(consumption_dollar, 2),
+            "generation_kwh": round(generation_kwh, 3),
+            "generation_value": round(generation_dollar, 2),
+            "carbon_emissions": round(carbon_tonne, 4),
+            "service_charge": round(service_charge, 2),
+            "total_charges": round(total_charges_dollar, 2),
+            "gst": round(gst_dollar, 2),
+            "is_pricing_reliable": bool(raw_entry.get("isPricingReliable", True)),
+        }
+
+        entries.append(entry)
+        total_consumption_kwh += entry["consumption_kwh"]
+        total_consumption_mj += entry["consumption_mj"]
+        total_generation_kwh += entry["generation_kwh"]
+        total_generation_value += entry["generation_value"]
+        total_charges += entry["total_charges"]
+        total_carbon += entry["carbon_emissions"]
+
+    entries.sort(key=lambda x: x["to_date"] or "")
+
+    return {
+        "entries": entries,
+        "latest": entries[-1] if entries else {},
+        "total_consumption_kwh": round(total_consumption_kwh, 3),
+        "total_consumption_mj": round(total_consumption_mj, 3),
+        "total_generation_kwh": round(total_generation_kwh, 3),
+        "total_generation_value": round(total_generation_value, 2),
+        "total_charges": round(total_charges, 2),
+        "total_carbon_emissions": round(total_carbon, 4),
+        "currency": "AUD",
+    }

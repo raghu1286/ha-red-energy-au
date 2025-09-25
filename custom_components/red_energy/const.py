@@ -10,7 +10,7 @@ CONF_PASSWORD: Final = "password"
 CONF_CLIENT_ID: Final = "client_id"
 
 DEFAULT_NAME: Final = "Red Energy"
-DEFAULT_SCAN_INTERVAL: Final = 300
+DEFAULT_SCAN_INTERVAL: Final = 600
 
 # Device information
 MANUFACTURER: Final = "Red Energy"

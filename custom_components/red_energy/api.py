@@ -318,6 +318,52 @@ class RedEnergyAPI:
                     
                 response.raise_for_status()
                 return await response.json()
+
+    async def get_daily_usage_summary(
+        self,
+        consumer_number: str,
+        from_date: datetime,
+        to_date: datetime,
+    ) -> List[Dict[str, Any]]:
+        """Get daily usage summary for a consumer."""
+        await self._ensure_valid_token()
+
+        url = f"{self.BASE_API_URL}/usage/daily"
+        params = {
+            'consumerNumber': consumer_number,
+            'fromDate': from_date.strftime('%Y-%m-%d'),
+            'toDate': to_date.strftime('%Y-%m-%d'),
+        }
+        headers = {'Authorization': f'Bearer {self._access_token}'}
+
+        async with async_timeout.timeout(API_TIMEOUT):
+            async with self._session.get(url, headers=headers, params=params) as response:
+                response.raise_for_status()
+                data = await response.json()
+                return data if isinstance(data, list) else []
+
+    async def get_monthly_usage_summary(
+        self,
+        consumer_number: str,
+        from_date: datetime,
+        to_date: datetime,
+    ) -> List[Dict[str, Any]]:
+        """Get monthly usage summary for a consumer."""
+        await self._ensure_valid_token()
+
+        url = f"{self.BASE_API_URL}/usage/monthly"
+        params = {
+            'consumerNumber': consumer_number,
+            'fromDate': from_date.strftime('%Y-%m-%d'),
+            'toDate': to_date.strftime('%Y-%m-%d'),
+        }
+        headers = {'Authorization': f'Bearer {self._access_token}'}
+
+        async with async_timeout.timeout(API_TIMEOUT):
+            async with self._session.get(url, headers=headers, params=params) as response:
+                response.raise_for_status()
+                data = await response.json()
+                return data if isinstance(data, list) else []
     
     async def _ensure_valid_token(self) -> None:
         """Ensure we have a valid access token."""

@@ -341,11 +341,11 @@ class RedEnergyOptionsFlowHandler(config_entries.OptionsFlow):
             if seconds == 60:
                 interval_options[key] = "1 minute"
             elif seconds == 300:
-                interval_options[key] = "5 minutes (default)"
+                interval_options[key] = "5 minutes"
+            elif seconds == 600:
+                interval_options[key] = "10 minutes (default)"
             elif seconds == 900:
                 interval_options[key] = "15 minutes"
-            elif seconds == 1800:
-                interval_options[key] = "30 minutes"  
             elif seconds == 3600:
                 interval_options[key] = "1 hour"
         
@@ -356,7 +356,7 @@ class RedEnergyOptionsFlowHandler(config_entries.OptionsFlow):
         })
 
         # Find the display name for current interval
-        current_interval_display = "5 minutes (default)"  # fallback
+        current_interval_display = "10 minutes (default)"  # fallback
         for key, seconds in SCAN_INTERVAL_OPTIONS.items():
             if seconds == current_scan_interval:
                 if key in interval_options:

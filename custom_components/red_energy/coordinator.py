@@ -15,6 +15,8 @@ from .api import RedEnergyAPI, RedEnergyAPIError, RedEnergyAuthError
 from .data_validation import (
     DataValidationError,
     validate_customer_data,
+    validate_daily_usage_summary,
+    validate_monthly_usage_summary,
     validate_properties_data,
     validate_usage_data,
 )
@@ -205,6 +207,32 @@ class RedEnergyDataCoordinator(DataUpdateCoordinator):
                             to_date=end_dt.strftime("%Y-%m-%d"),
                         )
 
+                        # Supplement with daily and monthly summaries for richer analytics
+                        daily_summary: Dict[str, Any] = {}
+                        monthly_summary: Dict[str, Any] = {}
+
+                        try:
+                            raw_daily = await self.api.get_daily_usage_summary(consumer, start_dt, end_dt)
+                            daily_summary = validate_daily_usage_summary(raw_daily)
+                        except Exception as err:
+                            _LOGGER.debug(
+                                "Daily summary fetch failed for pid=%s stype=%s: %s",
+                                pid, stype, err,
+                                exc_info=True,
+                            )
+
+                        try:
+                            month_end = end_dt
+                            month_start = month_end - timedelta(days=365)
+                            raw_monthly = await self.api.get_monthly_usage_summary(consumer, month_start, month_end)
+                            monthly_summary = validate_monthly_usage_summary(raw_monthly)
+                        except Exception as err:
+                            _LOGGER.debug(
+                                "Monthly summary fetch failed for pid=%s stype=%s: %s",
+                                pid, stype, err,
+                                exc_info=True,
+                            )
+
                         _LOGGER.debug(
                             "Validated usage pid=%s stype=%s: total_usage=%s total_cost=%s daily_len=%s",
                             pid, stype,
@@ -216,6 +244,8 @@ class RedEnergyDataCoordinator(DataUpdateCoordinator):
                         prop_usage[stype] = {
                             "consumer_number": consumer,
                             "usage_data": validated,
+                            "daily_summary": daily_summary,
+                            "monthly_summary": monthly_summary,
                             "last_updated": end_dt.isoformat(),
                         }
 
@@ -230,6 +260,8 @@ class RedEnergyDataCoordinator(DataUpdateCoordinator):
                                 "from_date": "",
                                 "to_date": "",
                             },
+                            "daily_summary": {},
+                            "monthly_summary": {},
                             "last_updated": dt_util.utcnow().isoformat(),
                             "error": str(err),
                         }
@@ -492,6 +524,50 @@ class RedEnergyDataCoordinator(DataUpdateCoordinator):
         val = svc["usage_data"].get("total_generation_value", 0.0)
         _LOGGER.debug("get_total_generation_value(%s,%s): %s", property_id, service_type, val)
         return val
+
+    def get_daily_summary(self, property_id: str, service_type: str) -> Optional[Dict[str, Any]]:
+        """Get daily summary data for a property/service."""
+        svc = self.get_service_usage(property_id, service_type)
+        if not svc:
+            return None
+        summary = svc.get("daily_summary")
+        if not summary:
+            _LOGGER.debug("get_daily_summary(%s,%s): summary missing", property_id, service_type)
+            return None
+        return summary
+
+    def get_latest_daily_entry(self, property_id: str, service_type: str) -> Optional[Dict[str, Any]]:
+        """Get the latest daily summary entry."""
+        summary = self.get_daily_summary(property_id, service_type)
+        if not summary:
+            return None
+        latest = summary.get("latest") or {}
+        if not latest:
+            entries = summary.get("entries", [])
+            latest = entries[-1] if entries else {}
+        return latest if latest else None
+
+    def get_monthly_summary(self, property_id: str, service_type: str) -> Optional[Dict[str, Any]]:
+        """Get monthly summary data for a property/service."""
+        svc = self.get_service_usage(property_id, service_type)
+        if not svc:
+            return None
+        summary = svc.get("monthly_summary")
+        if not summary:
+            _LOGGER.debug("get_monthly_summary(%s,%s): summary missing", property_id, service_type)
+            return None
+        return summary
+
+    def get_latest_monthly_entry(self, property_id: str, service_type: str) -> Optional[Dict[str, Any]]:
+        """Get the most recent monthly summary entry."""
+        summary = self.get_monthly_summary(property_id, service_type)
+        if not summary:
+            return None
+        latest = summary.get("latest") or {}
+        if not latest:
+            entries = summary.get("entries", [])
+            latest = entries[-1] if entries else {}
+        return latest if latest else None
 
     # ---------- Misc ----------
 

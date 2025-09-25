@@ -96,7 +96,7 @@ class RedEnergyConfigMigrator:
             
             # Add scan interval option (5 minutes default)
             if CONF_SCAN_INTERVAL not in new_options:
-                new_options[CONF_SCAN_INTERVAL] = "5min"
+                new_options[CONF_SCAN_INTERVAL] = "10min"
             
             # Update config entry
             self.hass.config_entries.async_update_entry(
@@ -230,7 +230,7 @@ class RedEnergyConfigValidator:
             errors.append("At least one service type must be selected")
         
         # Validate scan interval
-        scan_interval = config_entry.options.get(CONF_SCAN_INTERVAL, "5min")
+        scan_interval = config_entry.options.get(CONF_SCAN_INTERVAL, "10min")
         if scan_interval not in SCAN_INTERVAL_OPTIONS:
             errors.append(f"Invalid scan interval: {scan_interval}")
         
