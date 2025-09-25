@@ -193,6 +193,18 @@ def _selected_property_from_dict(payload: Mapping[str, object]) -> SelectedPrope
 
 
 def _extract_consumer_from_payload(raw: Mapping[str, object]) -> str | None:
+    consumers = raw.get("consumers")
+    if isinstance(consumers, list):
+        for consumer in consumers:
+            if not isinstance(consumer, Mapping):
+                continue
+            utility = str(consumer.get("utility") or consumer.get("fuel") or "").upper()
+            if utility and utility not in {"E", "ELEC", "ELECTRIC", "ELECTRICITY"}:
+                continue
+            value = consumer.get("consumerNumber") or consumer.get("consumer_number")
+            if value:
+                return str(value)
+
     def _is_electric(candidate: Mapping[str, object]) -> bool:
         identifiers: list[str] = []
         for key in (
@@ -226,7 +238,6 @@ def _extract_consumer_from_payload(raw: Mapping[str, object]) -> str | None:
     collections: list[object] = []
     for key in (
         "services",
-        "consumers",
         "meters",
         "accounts",
         "supplyPoints",

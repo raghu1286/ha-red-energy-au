@@ -75,6 +75,18 @@ def _normalise_property(raw: Mapping[str, Any]) -> _DiscoveredProperty | None:
 
 
 def _extract_consumer_number(raw: Mapping[str, Any]) -> str | None:
+    consumers = raw.get("consumers")
+    if isinstance(consumers, list):
+        for consumer in consumers:
+            if not isinstance(consumer, Mapping):
+                continue
+            utility = str(consumer.get("utility") or consumer.get("fuel") or "").upper()
+            if utility not in {"E", "ELEC", "ELECTRIC", "ELECTRICITY"}:
+                continue
+            value = consumer.get("consumerNumber") or consumer.get("consumer_number")
+            if value:
+                return str(value)
+
     def _is_electric(candidate: Mapping[str, Any]) -> bool:
         identifiers = []
         for key in (
