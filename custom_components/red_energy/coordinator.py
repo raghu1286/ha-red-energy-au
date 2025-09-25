@@ -12,7 +12,13 @@ from homeassistant.util import dt as dt_util
 
 from .api import RedEnergyAuthError, RedEnergyClient, RedEnergyError
 from .const import DEFAULT_UPDATE_INTERVAL, DOMAIN
-from .models import DailyUsageEntry, EnergyBreakdown, EnergyPeriod, PropertyEnergyData
+from .models import (
+    DailyUsageEntry,
+    EnergyBreakdown,
+    EnergyPeriod,
+    PropertyEnergyData,
+    SelectedProperty,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -25,7 +31,7 @@ class RedEnergyCoordinator(DataUpdateCoordinator[dict[str, PropertyEnergyData]])
         hass: HomeAssistant,
         *,
         client: RedEnergyClient,
-        property_ids: Iterable[str] | None,
+        selected_properties: Iterable[SelectedProperty],
         update_interval: timedelta | None = None,
     ) -> None:
         super().__init__(
@@ -35,7 +41,15 @@ class RedEnergyCoordinator(DataUpdateCoordinator[dict[str, PropertyEnergyData]])
             update_interval=update_interval or DEFAULT_UPDATE_INTERVAL,
         )
         self._client = client
-        self._configured_property_ids = {pid for pid in property_ids or [] if pid}
+        self._selected_properties: list[SelectedProperty] = [
+            SelectedProperty(
+                property_id=prop.property_id,
+                consumer_number=prop.consumer_number,
+                name=prop.name,
+            )
+            for prop in selected_properties
+            if prop.property_id
+        ]
 
     async def _async_update_data(self) -> dict[str, PropertyEnergyData]:
         try:
@@ -47,64 +61,79 @@ class RedEnergyCoordinator(DataUpdateCoordinator[dict[str, PropertyEnergyData]])
         except Exception as err:  # noqa: BLE001
             raise UpdateFailed(f"Unexpected error fetching properties: {err}") from err
 
-        property_map = _select_properties(properties, self._configured_property_ids)
-        if not property_map:
-            raise UpdateFailed("No electricity services available for the configured properties")
+        properties_by_id = {
+            pid: raw
+            for raw in properties
+            if isinstance(raw, dict) and (pid := _extract_property_id(raw))
+        }
+        _LOGGER.debug(
+            "Coordinator discovered %d properties from API payload", len(properties_by_id)
+        )
 
         results: dict[str, PropertyEnergyData] = {}
         now = dt_util.utcnow()
 
-        for prop_id, metadata in property_map.items():
-            consumer_number = metadata["consumer_number"]
+        for selected in self._selected_properties:
+            raw = properties_by_id.get(selected.property_id)
+            name = selected.name
+            consumer_number = selected.consumer_number
+
+            if raw:
+                name = _extract_property_name(raw) or name
+                dynamic_consumer = _extract_electricity_consumer(raw)
+                if dynamic_consumer:
+                    consumer_number = dynamic_consumer
+            else:
+                _LOGGER.debug(
+                    "Configured property %s not returned by API; using stored consumer number",
+                    selected.property_id,
+                )
+
+            if not consumer_number:
+                _LOGGER.warning(
+                    "Skipping property %s because no consumer number is available",
+                    selected.property_id,
+                )
+                continue
+
+            _LOGGER.debug(
+                "Fetching usage for property %s (consumer %s)",
+                selected.property_id,
+                consumer_number,
+            )
             try:
                 daily_entries = await self._client.async_get_daily_usage_entries(consumer_number)
             except RedEnergyAuthError as err:
-                raise UpdateFailed(f"Authentication failed while fetching usage for {prop_id}: {err}") from err
+                raise UpdateFailed(
+                    f"Authentication failed while fetching usage for {selected.property_id}: {err}"
+                ) from err
             except RedEnergyError as err:
-                raise UpdateFailed(f"Failed to retrieve usage for {prop_id}: {err}") from err
+                raise UpdateFailed(
+                    f"Failed to retrieve usage for {selected.property_id}: {err}"
+                ) from err
             except Exception as err:  # noqa: BLE001
-                raise UpdateFailed(f"Unexpected error fetching usage for {prop_id}: {err}") from err
+                raise UpdateFailed(
+                    f"Unexpected error fetching usage for {selected.property_id}: {err}"
+                ) from err
 
             breakdown = _build_breakdown(daily_entries)
-            results[prop_id] = PropertyEnergyData(
-                property_id=prop_id,
-                name=metadata["name"],
+            results[selected.property_id] = PropertyEnergyData(
+                property_id=selected.property_id,
+                name=name,
                 breakdown=breakdown,
                 last_updated=now,
                 consumer_number=consumer_number,
             )
+            selected.name = name
+            selected.consumer_number = consumer_number
+
+            _LOGGER.debug(
+                "Property %s fetched %d usage entries",
+                selected.property_id,
+                len(daily_entries),
+            )
 
         return results
-
-
-def _select_properties(
-    properties: list[dict[str, Any]], configured_ids: set[str],
-) -> dict[str, dict[str, str]]:
-    """Return a mapping of property id -> metadata for electricity services."""
-    property_map: dict[str, dict[str, str]] = {}
-
-    for raw in properties:
-        prop_id = _extract_property_id(raw)
-        if not prop_id:
-            continue
-        if configured_ids and prop_id not in configured_ids:
-            continue
-
-        name = _extract_property_name(raw) or f"Property {prop_id}"
-        consumer_number = _extract_electricity_consumer(raw)
-        if not consumer_number:
-            continue
-
-        property_map[prop_id] = {"name": name, "consumer_number": consumer_number}
-
-    if not property_map and not configured_ids:
-        _LOGGER.debug("No electricity services found in property payload: %s", properties)
-    elif configured_ids:
-        missing = configured_ids - property_map.keys()
-        if missing:
-            _LOGGER.warning("Configured properties missing electricity data: %s", sorted(missing))
-
-    return property_map
 
 
 def _extract_property_id(raw: dict[str, Any]) -> str | None:

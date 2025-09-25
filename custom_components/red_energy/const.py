@@ -10,6 +10,7 @@ DOMAIN: Final = "red_energy"
 PLATFORMS: Final = [Platform.SENSOR]
 
 CONF_PROPERTY_IDS: Final = "property_ids"
+CONF_SELECTED_PROPERTIES: Final = "selected_properties"
 CONF_UPDATE_INTERVAL: Final = "update_interval"
 
 DATA_CLIENT: Final = "client"
@@ -20,6 +21,10 @@ MINIMUM_UPDATE_INTERVAL: Final = timedelta(minutes=15)
 MAXIMUM_UPDATE_INTERVAL: Final = timedelta(hours=2)
 
 STEP_SELECT_PROPERTIES: Final = "select_properties"
+
+PROPERTY_KEY_ID: Final = "property_id"
+PROPERTY_KEY_NAME: Final = "name"
+PROPERTY_KEY_CONSUMER: Final = "consumer_number"
 
 SENSOR_KIND_DAILY_ELECTRICITY: Final = "daily_electricity"
 SENSOR_KIND_WEEKLY_ELECTRICITY: Final = "weekly_electricity"

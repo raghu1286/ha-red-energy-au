@@ -42,3 +42,12 @@ class PropertyEnergyData:
     breakdown: EnergyBreakdown
     last_updated: datetime
     consumer_number: str
+
+
+@dataclass(slots=True)
+class SelectedProperty:
+    """Store the user-selected property configuration."""
+
+    property_id: str
+    consumer_number: str
+    name: str

@@ -1,6 +1,7 @@
 """Config flow for the Red Energy integration."""
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -16,17 +17,25 @@ from homeassistant.helpers import config_validation as cv
 from .api import RedEnergyAuthError, RedEnergyClient
 from .const import (
     CONF_PROPERTY_IDS,
+    CONF_SELECTED_PROPERTIES,
     CONF_UPDATE_INTERVAL,
     DEFAULT_UPDATE_INTERVAL,
     DOMAIN,
     MINIMUM_UPDATE_INTERVAL,
+    PROPERTY_KEY_CONSUMER,
+    PROPERTY_KEY_ID,
+    PROPERTY_KEY_NAME,
 )
+
+
+_LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
 class _DiscoveredProperty:
     identifier: str
     name: str
+    consumer_number: str
 
 
 def _normalise_property(raw: Mapping[str, Any]) -> _DiscoveredProperty | None:
@@ -46,7 +55,34 @@ def _normalise_property(raw: Mapping[str, Any]) -> _DiscoveredProperty | None:
         display = address.get("displayAddress") or address.get("gentrackDisplayAddress")
         name = str(display).replace("\n", ", ") if display else f"Property {identifier}"
 
-    return _DiscoveredProperty(identifier=str(identifier), name=str(name))
+    consumer = _extract_consumer_number(raw)
+    if not consumer:
+        _LOGGER.debug("Skipping property %s because no electricity consumer number was found", identifier)
+        return None
+
+    return _DiscoveredProperty(
+        identifier=str(identifier),
+        name=str(name),
+        consumer_number=str(consumer),
+    )
+
+
+def _extract_consumer_number(raw: Mapping[str, Any]) -> str | None:
+    services = raw.get("services")
+    if not isinstance(services, list):
+        return None
+
+    for service in services:
+        if not isinstance(service, Mapping):
+            continue
+        service_type = str(service.get("type") or service.get("serviceType") or "").lower()
+        if service_type not in {"electricity", "elec"}:
+            continue
+        for key in ("consumerNumber", "consumer_number", "consumerNo"):
+            value = service.get(key)
+            if value:
+                return str(value)
+    return None
 
 
 class RedEnergyConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -151,7 +187,35 @@ class RedEnergyConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 errors={"base": "select_property"},
             )
 
-        data = {**self._stored_user_input, CONF_PROPERTY_IDS: property_ids}
+        selected_payload: list[dict[str, str]] = []
+        for identifier in property_ids:
+            match = next((prop for prop in self._properties if prop.identifier == identifier), None)
+            if not match:
+                _LOGGER.debug("Selected property %s no longer present in discovery results", identifier)
+                continue
+            selected_payload.append(
+                {
+                    PROPERTY_KEY_ID: match.identifier,
+                    PROPERTY_KEY_NAME: match.name,
+                    PROPERTY_KEY_CONSUMER: match.consumer_number,
+                }
+            )
+
+        if not selected_payload:
+            return self.async_show_form(
+                step_id="select_properties",
+                data_schema=vol.Schema(
+                    {
+                        vol.Required(CONF_PROPERTY_IDS, default=list(choices.keys())): cv.multi_select(choices),
+                    }
+                ),
+                errors={"base": "select_property"},
+            )
+
+        data = {
+            **self._stored_user_input,
+            CONF_SELECTED_PROPERTIES: selected_payload,
+        }
 
         if self._reauth_entry:
             self.hass.config_entries.async_update_entry(
@@ -161,7 +225,7 @@ class RedEnergyConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             await self.hass.config_entries.async_reload(self._reauth_entry.entry_id)
             return self.async_abort(reason="reauth_successful")
 
-        title = self._properties[0].name if len(property_ids) == 1 else "Red Energy"
+        title = self._properties[0].name if len(selected_payload) == 1 else "Red Energy"
         return self.async_create_entry(title=title, data=data)
 
     async def async_step_reauth(self, entry_data: Mapping[str, Any]) -> FlowResult:
