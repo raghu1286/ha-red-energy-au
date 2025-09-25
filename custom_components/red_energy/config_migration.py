@@ -90,9 +90,9 @@ class RedEnergyConfigMigrator:
             new_data = dict(config_entry.data)
             new_options = dict(config_entry.options)
             
-            # Add advanced sensors option (disabled by default for existing users)
+            # Add advanced sensors option (enabled by default)
             if CONF_ENABLE_ADVANCED_SENSORS not in new_options:
-                new_options[CONF_ENABLE_ADVANCED_SENSORS] = False
+                new_options[CONF_ENABLE_ADVANCED_SENSORS] = True
             
             # Add scan interval option (5 minutes default)
             if CONF_SCAN_INTERVAL not in new_options:
@@ -282,7 +282,7 @@ class RedEnergyConfigValidator:
         suggestions = []
         
         # Check if advanced sensors are disabled
-        if not config_entry.options.get(CONF_ENABLE_ADVANCED_SENSORS, False):
+        if not config_entry.options.get(CONF_ENABLE_ADVANCED_SENSORS, True):
             suggestions.append(
                 "Enable advanced sensors for detailed usage analytics and efficiency monitoring"
             )

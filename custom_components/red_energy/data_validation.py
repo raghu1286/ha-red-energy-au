@@ -298,6 +298,8 @@ def _validate_red_energy_usage_array(data: List[Dict[str, Any]], consumer_number
     validated_entries = []
     total_usage = 0.0
     total_cost = 0.0
+    total_generation = 0.0
+    total_generation_value = 0.0
     
     for daily_data in data:
         if not isinstance(daily_data, dict):
@@ -318,6 +320,7 @@ def _validate_red_energy_usage_array(data: List[Dict[str, Any]], consumer_number
         daily_consumption = 0.0
         daily_cost = 0.0
         daily_generation = 0.0
+        daily_generation_value = 0.0
         
         for interval in half_hours:
             if not isinstance(interval, dict):
@@ -326,10 +329,15 @@ def _validate_red_energy_usage_array(data: List[Dict[str, Any]], consumer_number
             consumption_kwh = float(interval.get("consumptionKwh", 0))
             consumption_dollar_inc_gst = float(interval.get("consumptionDollarIncGst", 0))
             generation_kwh = float(interval.get("generationKwh", 0))
-            
+            generation_dollar = interval.get("generationDollarIncGst")
+            if generation_dollar is None:
+                generation_dollar = interval.get("generationDollar")
+            generation_dollar = float(generation_dollar or 0)
+
             daily_consumption += consumption_kwh
             daily_cost += consumption_dollar_inc_gst
             daily_generation += generation_kwh
+            daily_generation_value += generation_dollar
         
         # Create validated daily entry
         validated_entry = {
@@ -337,13 +345,16 @@ def _validate_red_energy_usage_array(data: List[Dict[str, Any]], consumer_number
             "usage": round(daily_consumption, 3),
             "cost": round(daily_cost, 2),
             "generation": round(daily_generation, 3),
+            "generation_value": round(daily_generation_value, 2),
             "unit": "kWh",
             "intervals": len(half_hours)
         }
-        
+
         validated_entries.append(validated_entry)
         total_usage += validated_entry["usage"]
         total_cost += validated_entry["cost"]
+        total_generation += validated_entry["generation"]
+        total_generation_value += validated_entry["generation_value"]
     
     return {
         "consumer_number": str(consumer_number) if consumer_number else "unknown",
@@ -352,6 +363,8 @@ def _validate_red_energy_usage_array(data: List[Dict[str, Any]], consumer_number
         "usage_data": validated_entries,
         "total_usage": round(total_usage, 2),
         "total_cost": round(total_cost, 2),
+        "total_generation": round(total_generation, 3),
+        "total_generation_value": round(total_generation_value, 2),
     }
 
 

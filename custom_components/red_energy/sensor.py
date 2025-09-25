@@ -59,9 +59,11 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry, asyn
     property_ids = selected_accounts or available_property_ids
 
     entities = []
-    advanced_sensors_enabled = config_entry.options.get(CONF_ENABLE_ADVANCED_SENSORS, False)
+    advanced_sensors_enabled = config_entry.options.get(CONF_ENABLE_ADVANCED_SENSORS, True)
 
     created_pairs = []
+    base_sensor_count = 0
+    advanced_sensor_count = 0
 
     for pid in property_ids:
         block = usage_data.get(pid)
@@ -84,6 +86,15 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry, asyn
                 RedEnergyCostSensor(coordinator, config_entry, pid, stype),
                 RedEnergyTotalUsageSensor(coordinator, config_entry, pid, stype),
             ])
+            base_sensor_count += 3
+
+            if stype == SERVICE_TYPE_ELECTRICITY:
+                entities.extend([
+                    RedEnergyTotalGenerationSensor(coordinator, config_entry, pid, stype),
+                    RedEnergyGenerationValueSensor(coordinator, config_entry, pid, stype),
+                ])
+                base_sensor_count += 2
+
             if advanced_sensors_enabled:
                 entities.extend([
                     RedEnergyDailyAverageSensor(coordinator, config_entry, pid, stype),
@@ -91,11 +102,12 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry, asyn
                     RedEnergyPeakUsageSensor(coordinator, config_entry, pid, stype),
                     RedEnergyEfficiencySensor(coordinator, config_entry, pid, stype),
                 ])
+                advanced_sensor_count += 4
             created_pairs.append((pid, stype))
 
     _LOGGER.debug(
-        "Created %d sensors (%d advanced) for property/service pairs=%s",
-        len(entities), len(entities) - (len(created_pairs) * 3), created_pairs
+        "Created %d sensors (%d base, %d advanced) for property/service pairs=%s",
+        len(entities), base_sensor_count, advanced_sensor_count, created_pairs
     )
     async_add_entities(entities)
 
@@ -129,8 +141,9 @@ class RedEnergyBaseSensor(CoordinatorEntity, SensorEntity):
             property_name = property_data.get("name", f"Property {property_id}")
             
         service_display = service_type.title()
-        
-        self._attr_name = f"{property_name} {service_display} {sensor_type.title()}"
+
+        sensor_label = sensor_type.replace("_", " ").title()
+        self._attr_name = f"{property_name} {service_display} {sensor_label}"
         self._attr_unique_id = f"{DOMAIN}_{config_entry.entry_id}_{property_id}_{service_type}_{sensor_type}"
         
         # Set device info for grouping
@@ -284,6 +297,88 @@ class RedEnergyTotalUsageSensor(RedEnergyBaseSensor):
             "daily_count": len(daily_data),
             "from_date": usage_data.get("from_date"),
             "to_date": usage_data.get("to_date"),
+        }
+
+
+class RedEnergyTotalGenerationSensor(RedEnergyBaseSensor):
+    """Red Energy total solar generation sensor (30-day period)."""
+
+    def __init__(
+        self,
+        coordinator: RedEnergyDataCoordinator,
+        config_entry: ConfigEntry,
+        property_id: str,
+        service_type: str,
+    ) -> None:
+        """Initialize the total generation sensor."""
+        super().__init__(coordinator, config_entry, property_id, service_type, "solar_generation")
+
+        self._attr_device_class = SensorDeviceClass.ENERGY
+        self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
+        self._attr_state_class = SensorStateClass.TOTAL
+        self._attr_icon = "mdi:solar-power"
+
+    @property
+    def native_value(self) -> Optional[float]:
+        """Return the total solar generation."""
+        return self.coordinator.get_total_generation(self._property_id, self._service_type)
+
+    @property
+    def extra_state_attributes(self) -> Optional[dict[str, Any]]:
+        service_data = self.coordinator.get_service_usage(self._property_id, self._service_type)
+        if not service_data:
+            return None
+
+        usage_data = service_data.get("usage_data", {})
+        daily_data = usage_data.get("usage_data", [])
+
+        return {
+            "consumer_number": service_data.get("consumer_number"),
+            "last_updated": service_data.get("last_updated"),
+            "service_type": self._service_type,
+            "period": "30 days",
+            "daily_generation_points": sum(1 for entry in daily_data if entry.get("generation")),
+            "total_generation_value": usage_data.get("total_generation_value", 0.0),
+        }
+
+
+class RedEnergyGenerationValueSensor(RedEnergyBaseSensor):
+    """Red Energy solar generation monetary value sensor."""
+
+    def __init__(
+        self,
+        coordinator: RedEnergyDataCoordinator,
+        config_entry: ConfigEntry,
+        property_id: str,
+        service_type: str,
+    ) -> None:
+        """Initialize the generation value sensor."""
+        super().__init__(coordinator, config_entry, property_id, service_type, "solar_generation_value")
+
+        self._attr_device_class = SensorDeviceClass.MONETARY
+        self._attr_native_unit_of_measurement = "AUD"
+        self._attr_state_class = SensorStateClass.TOTAL
+        self._attr_icon = "mdi:currency-usd"
+
+    @property
+    def native_value(self) -> Optional[float]:
+        """Return the monetary value of solar generation."""
+        return self.coordinator.get_total_generation_value(self._property_id, self._service_type)
+
+    @property
+    def extra_state_attributes(self) -> Optional[dict[str, Any]]:
+        service_data = self.coordinator.get_service_usage(self._property_id, self._service_type)
+        if not service_data:
+            return None
+
+        usage_data = service_data.get("usage_data", {})
+
+        return {
+            "consumer_number": service_data.get("consumer_number"),
+            "last_updated": service_data.get("last_updated"),
+            "service_type": self._service_type,
+            "period": "30 days",
+            "total_generation": usage_data.get("total_generation", 0.0),
         }
 
 

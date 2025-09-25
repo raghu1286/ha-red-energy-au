@@ -321,7 +321,7 @@ class RedEnergyOptionsFlowHandler(config_entries.OptionsFlow):
         current_services = self.config_entry.data.get("services", [SERVICE_TYPE_ELECTRICITY])
         current_options = self.config_entry.options
         current_scan_interval = current_options.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)
-        current_advanced_sensors = current_options.get(CONF_ENABLE_ADVANCED_SENSORS, False)
+        current_advanced_sensors = current_options.get(CONF_ENABLE_ADVANCED_SENSORS, True)
         
         # Ensure current_scan_interval is an integer
         if isinstance(current_scan_interval, str):

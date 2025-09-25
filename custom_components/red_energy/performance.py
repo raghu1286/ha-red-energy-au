@@ -227,6 +227,11 @@ class DataProcessor:
                     "total_cost": usage_info.get("total_cost", 0),
                     "total_usage": usage_info.get("total_usage", 0)
                 }
+
+                if "total_generation" in usage_info:
+                    service_sensors["total_generation"] = usage_info.get("total_generation", 0)
+                if "total_generation_value" in usage_info:
+                    service_sensors["total_generation_value"] = usage_info.get("total_generation_value", 0)
                 
                 # Advanced sensors (only if enabled)
                 if advanced_sensors_enabled and daily_stats["count"] > 0:

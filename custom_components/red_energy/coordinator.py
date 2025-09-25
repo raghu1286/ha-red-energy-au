@@ -95,6 +95,8 @@ class RedEnergyDataCoordinator(DataUpdateCoordinator):
             "last_updated": svc.get("last_updated"),
             "total_usage": ud.get("total_usage"),
             "total_cost": ud.get("total_cost"),
+            "total_generation": ud.get("total_generation"),
+            "total_generation_value": ud.get("total_generation_value"),
             "from": ud.get("from_date"),
             "to": ud.get("to_date"),
             "daily(len)": len(ud.get("usage_data", [])),
@@ -469,6 +471,26 @@ class RedEnergyDataCoordinator(DataUpdateCoordinator):
             return None
         val = svc["usage_data"].get("total_usage", 0.0)
         _LOGGER.debug("get_total_usage(%s,%s): %s", property_id, service_type, val)
+        return val
+
+    def get_total_generation(self, property_id: str, service_type: str) -> Optional[float]:
+        """Get the total solar generation for a property and service."""
+        svc = self.get_service_usage(property_id, service_type)
+        if not svc or "usage_data" not in svc:
+            _LOGGER.debug("get_total_generation(%s,%s): no svc/usage_data", property_id, service_type)
+            return None
+        val = svc["usage_data"].get("total_generation", 0.0)
+        _LOGGER.debug("get_total_generation(%s,%s): %s", property_id, service_type, val)
+        return val
+
+    def get_total_generation_value(self, property_id: str, service_type: str) -> Optional[float]:
+        """Get the monetary value of solar generation for a property and service."""
+        svc = self.get_service_usage(property_id, service_type)
+        if not svc or "usage_data" not in svc:
+            _LOGGER.debug("get_total_generation_value(%s,%s): no svc/usage_data", property_id, service_type)
+            return None
+        val = svc["usage_data"].get("total_generation_value", 0.0)
+        _LOGGER.debug("get_total_generation_value(%s,%s): %s", property_id, service_type, val)
         return val
 
     # ---------- Misc ----------
