@@ -17,6 +17,7 @@ from homeassistant.helpers import config_validation as cv
 
 from .api import RedEnergyAPI, RedEnergyAPIError, RedEnergyAuthError
 from .data_validation import validate_config_data, DataValidationError
+from .config_migration import CURRENT_CONFIG_VERSION
 from .const import (
     CONF_CLIENT_ID,
     CONF_ENABLE_ADVANCED_SENSORS,
@@ -123,19 +124,24 @@ async def validate_input(hass: HomeAssistant, data: dict[str, Any]) -> dict[str,
 class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Red Energy."""
 
-    VERSION = 1
+    VERSION = CURRENT_CONFIG_VERSION
     
     @staticmethod
     async def async_migrate_entry(hass: HomeAssistant, config_entry: config_entries.ConfigEntry) -> bool:
         """Migrate old entry."""
-        _LOGGER.debug("Migrating config entry from version %s", config_entry.version)
-        
-        if config_entry.version == 1:
-            # Already at current version
+        _LOGGER.debug(
+            "ConfigFlow migration requested for entry %s at version %s",
+            config_entry.entry_id,
+            config_entry.version,
+        )
+
+        if config_entry.version >= CURRENT_CONFIG_VERSION:
             return True
-            
-        # If we ever need to migrate from older versions
-        return True
+
+        from .config_migration import RedEnergyConfigMigrator
+
+        migrator = RedEnergyConfigMigrator(hass)
+        return await migrator.async_migrate_config_entry(config_entry)
 
     def __init__(self) -> None:
         """Initialize the config flow."""

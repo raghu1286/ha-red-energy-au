@@ -27,6 +27,28 @@ _LOGGER = logging.getLogger(__name__)
 PLATFORMS: list[Platform] = [Platform.SENSOR]
 
 
+async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Handle migration of config entry data when Home Assistant requests it."""
+    from .config_migration import RedEnergyConfigMigrator
+
+    _LOGGER.debug(
+        "Home Assistant triggered migration for entry %s from version %s",
+        entry.entry_id,
+        entry.version,
+    )
+
+    migrator = RedEnergyConfigMigrator(hass)
+    success = await migrator.async_migrate_config_entry(entry)
+
+    if not success:
+        _LOGGER.error(
+            "Config entry migration reported failure for entry %s; continuing with best effort",
+            entry.entry_id,
+        )
+
+    return success
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Red Energy from a config entry."""
     _LOGGER.debug("Setting up Red Energy integration for entry %s", entry.entry_id)
