@@ -147,6 +147,11 @@ async def _async_resolve_selected_properties(
         if not consumer:
             _LOGGER.warning("Legacy property %s has no electricity consumer number; skipping", property_id)
             continue
+        _LOGGER.debug(
+            "Resolved consumer %s for legacy property %s",
+            consumer,
+            property_id,
+        )
         name = str(
             raw.get("name")
             or raw.get("displayName")
@@ -188,17 +193,67 @@ def _selected_property_from_dict(payload: Mapping[str, object]) -> SelectedPrope
 
 
 def _extract_consumer_from_payload(raw: Mapping[str, object]) -> str | None:
-    services = raw.get("services")
-    if not isinstance(services, Iterable):
-        return None
-    for service in services:
-        if not isinstance(service, Mapping):
-            continue
-        service_type = str(service.get("type") or service.get("serviceType") or "").lower()
-        if service_type not in {"electricity", "elec"}:
-            continue
-        for key in ("consumerNumber", "consumer_number", "consumerNo"):
-            value = service.get(key)
+    def _is_electric(candidate: Mapping[str, object]) -> bool:
+        identifiers: list[str] = []
+        for key in (
+            "type",
+            "serviceType",
+            "service_type",
+            "productType",
+            "fuel",
+            "fuelType",
+            "commodity",
+            "category",
+            "name",
+            "description",
+            "channel",
+        ):
+            value = candidate.get(key)
+            if isinstance(value, str):
+                identifiers.append(value.lower())
+        combined = " ".join(identifiers)
+        return "electric" in combined or "elec" in combined or "power" in combined
+
+    def _extract_candidate(candidate: Mapping[str, object]) -> str | None:
+        for key in (
+            "consumerNumber",
+            "consumer_number",
+            "consumerNo",
+            "consumer_no",
+            "accountNumber",
+            "account_number",
+            "nmi",
+            "nmiNumber",
+            "meterNumber",
+            "meter_number",
+        ):
+            value = candidate.get(key)
             if value:
                 return str(value)
+        return None
+
+    collections: list[object] = []
+    for key in (
+        "services",
+        "consumers",
+        "meters",
+        "accounts",
+        "supplyPoints",
+        "supply_points",
+    ):
+        value = raw.get(key)
+        if isinstance(value, list):
+            collections.extend(value)
+
+    collections.append(raw)
+
+    for candidate in collections:
+        if not isinstance(candidate, Mapping):
+            continue
+        if candidate is not raw and not _is_electric(candidate):
+            continue
+        consumer = _extract_candidate(candidate)
+        if consumer:
+            return consumer
+
     return None

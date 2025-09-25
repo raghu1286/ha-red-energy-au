@@ -60,6 +60,13 @@ def _normalise_property(raw: Mapping[str, Any]) -> _DiscoveredProperty | None:
         _LOGGER.debug("Skipping property %s because no electricity consumer number was found", identifier)
         return None
 
+    _LOGGER.debug(
+        "Discovered property %s (%s) with consumer number %s",
+        identifier,
+        name,
+        consumer,
+    )
+
     return _DiscoveredProperty(
         identifier=str(identifier),
         name=str(name),
@@ -68,20 +75,70 @@ def _normalise_property(raw: Mapping[str, Any]) -> _DiscoveredProperty | None:
 
 
 def _extract_consumer_number(raw: Mapping[str, Any]) -> str | None:
-    services = raw.get("services")
-    if not isinstance(services, list):
-        return None
+    def _is_electric(candidate: Mapping[str, Any]) -> bool:
+        identifiers = []
+        for key in (
+            "type",
+            "serviceType",
+            "service_type",
+            "productType",
+            "fuel",
+            "fuelType",
+            "commodity",
+            "category",
+            "name",
+            "description",
+            "channel",
+        ):
+            value = candidate.get(key)
+            if isinstance(value, str):
+                identifiers.append(value.lower())
+        combined = " ".join(identifiers)
+        return "electric" in combined or "elec" in combined or "power" in combined
 
-    for service in services:
-        if not isinstance(service, Mapping):
-            continue
-        service_type = str(service.get("type") or service.get("serviceType") or "").lower()
-        if service_type not in {"electricity", "elec"}:
-            continue
-        for key in ("consumerNumber", "consumer_number", "consumerNo"):
-            value = service.get(key)
+    def _extract_candidate(candidate: Mapping[str, Any]) -> str | None:
+        for key in (
+            "consumerNumber",
+            "consumer_number",
+            "consumerNo",
+            "consumer_no",
+            "accountNumber",
+            "account_number",
+            "nmi",
+            "nmiNumber",
+            "meterNumber",
+            "meter_number",
+        ):
+            value = candidate.get(key)
             if value:
                 return str(value)
+        return None
+
+    collections: list[Any] = []
+    for key in (
+        "services",
+        "consumers",
+        "meters",
+        "accounts",
+        "supplyPoints",
+        "supply_points",
+    ):
+        value = raw.get(key)
+        if isinstance(value, list):
+            collections.extend(value)
+
+    # Some payloads carry the consumer number directly on the property data
+    collections.append(raw)
+
+    for candidate in collections:
+        if not isinstance(candidate, Mapping):
+            continue
+        if candidate is not raw and not _is_electric(candidate):
+            continue
+        consumer = _extract_candidate(candidate)
+        if consumer:
+            return consumer
+
     return None
 
 

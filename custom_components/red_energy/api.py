@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import logging
 import secrets
 import string
@@ -115,13 +116,22 @@ class RedEnergyClient:
                 if response.status != 200 or data.get("status") != "SUCCESS":
                     message = data.get("errorSummary") or data.get("status") or "Unknown error"
                     raise RedEnergyAuthError(message)
-                return data["sessionToken"], data.get("expiresAt")
+        self._log_api_payload(
+            "POST authn",
+            {
+                "status": data.get("status"),
+                "expires_at": data.get("expiresAt"),
+            },
+        )
+        return data["sessionToken"], data.get("expiresAt")
 
     async def _async_get_discovery_data(self) -> dict[str, Any]:
         async with async_timeout.timeout(API_TIMEOUT):
             async with self._session.get(self.DISCOVERY_URL) as response:
                 response.raise_for_status()
-                return await response.json()
+                data = await response.json()
+        self._log_api_payload("GET discovery", data)
+        return data
 
     async def _async_get_authorisation_code(
         self,
@@ -184,6 +194,13 @@ class RedEnergyClient:
         self._refresh_token = data.get("refresh_token")
         expires_in = int(data.get("expires_in", DEFAULT_UPDATE_INTERVAL.total_seconds()))
         self._token_expires = dt_util.utcnow() + timedelta(seconds=expires_in)
+        self._log_api_payload(
+            "POST token",
+            {
+                "expires_in": expires_in,
+                "has_refresh": bool(self._refresh_token),
+            },
+        )
 
     async def async_get_properties(self) -> list[dict[str, Any]]:
         """Return the properties linked to the account."""
@@ -194,6 +211,7 @@ class RedEnergyClient:
             async with self._session.get(url, headers=headers) as response:
                 response.raise_for_status()
                 payload = await response.json()
+        self._log_api_payload("GET properties", payload)
         if isinstance(payload, list):
             return payload
         return payload.get("properties", []) if isinstance(payload, dict) else []
@@ -222,7 +240,13 @@ class RedEnergyClient:
             async with self._session.get(url, headers=headers, params=params) as response:
                 response.raise_for_status()
                 payload = await response.json()
-
+        self._log_api_payload(
+            "GET usage/daily",
+            {
+                "params": params,
+                "payload": payload,
+            },
+        )
         return _normalise_daily_payload(payload)
 
     async def async_refresh_token(self) -> None:
@@ -247,6 +271,25 @@ class RedEnergyClient:
         self._refresh_token = data.get("refresh_token", self._refresh_token)
         expires_in = int(data.get("expires_in", DEFAULT_UPDATE_INTERVAL.total_seconds()))
         self._token_expires = dt_util.utcnow() + timedelta(seconds=expires_in)
+        self._log_api_payload(
+            "POST token/refresh",
+            {
+                "expires_in": expires_in,
+                "has_refresh": bool(self._refresh_token),
+            },
+        )
+
+    def _log_api_payload(self, label: str, payload: Any) -> None:
+        """Log API payloads with size limits to aid debugging."""
+        try:
+            serialised = json.dumps(payload, default=str)
+        except (TypeError, ValueError):
+            serialised = str(payload)
+
+        if len(serialised) > 4000:
+            serialised = f"{serialised[:4000]}... (truncated)"
+
+        _LOGGER.debug("%s response: %s", label, serialised)
 
 
 def _generate_code_verifier() -> str:
