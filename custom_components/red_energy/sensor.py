@@ -331,12 +331,14 @@ class RedEnergySensor(CoordinatorEntity[RedEnergyCoordinator], SensorEntity):
         if period is None:
             return None
 
+        last_updated = property_data.last_updated.date().isoformat()
+
         return {
             "property_id": property_data.property_id,
             "period_start": period.start.isoformat(),
             "period_end": period.end.isoformat(),
             "metric": self.entity_description.metric,
-            "last_updated": property_data.last_updated.isoformat(),
+            "last_updated": last_updated,
             "consumption_kwh": period.consumption_kwh,
             "generation_kwh": period.generation_kwh,
             "consumption_cost": period.consumption_cost,
